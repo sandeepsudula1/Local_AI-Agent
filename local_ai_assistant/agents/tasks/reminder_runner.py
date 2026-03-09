@@ -3,11 +3,15 @@ from datetime import datetime
 import json
 import os
 import dateparser
-from win10toast import ToastNotifier
+
+try:
+    from plyer import notification as _plyer_notification
+    _HAS_PLYER = True
+except Exception:
+    _plyer_notification = None
+    _HAS_PLYER = False
 
 print("🔥 RUNNING LATEST reminder_runner.py")
-
-notifier = ToastNotifier()
 
 # ---------------------
 # FILE PATH
@@ -69,11 +73,20 @@ def check_reminders():
             except Exception:
                 pass
 
-            # use non-threaded to avoid pywin32 callback issues
-            try:
-                notifier.show_toast("Reminder", msg, duration=5, threaded=False)
-            except Exception:
-                # fallback to console if toast fails
+            # Windows desktop notification via plyer
+            _notified = False
+            if _HAS_PLYER:
+                try:
+                    _plyer_notification.notify(
+                        title="Reminder",
+                        message=msg,
+                        timeout=5,
+                        app_name="AI Assistant",
+                    )
+                    _notified = True
+                except Exception:
+                    pass
+            if not _notified:
                 print(f"[Notification] Reminder: {msg}")
 
             r["fired"] = True

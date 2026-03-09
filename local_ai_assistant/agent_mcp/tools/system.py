@@ -215,14 +215,15 @@ def system_status() -> dict:
         and bool(list(os.scandir(_ROOT + "/data/vector_store_v2")))
     )
 
-    # Document count
+    # Document count — only count actual user document extensions (mirrors documents.list)
+    _DOC_EXTS = {'.pdf', '.csv', '.txt', '.docx', '.doc', '.xlsx', '.xls', '.png', '.jpg', '.jpeg'}
     doc_count = 0
     docs_path = os.path.join(_ROOT, "data", "documents")
     if os.path.exists(docs_path):
         doc_count = sum(
             1 for f in os.listdir(docs_path)
             if os.path.isfile(os.path.join(docs_path, f))
-            and not f.endswith(".py")
+            and os.path.splitext(f)[1].lower() in _DOC_EXTS
         )
 
     # Reminders count

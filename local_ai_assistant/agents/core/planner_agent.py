@@ -5,7 +5,10 @@
 # Regex fast-paths are kept for the most obvious unambiguous patterns
 # (greetings, current time/date) to avoid unnecessary LLM calls.
 
+from __future__ import annotations
+
 import re
+from typing import Optional
 
 try:
     import ollama as _ollama
@@ -51,7 +54,7 @@ Rules:
 - Output ONLY the intent label. No explanation. No punctuation."""
 
 
-def _llm_classify(user_input: str) -> str:
+def _llm_classify(user_input: str) -> Optional[str]:
     """Ask the local LLM to classify intent. Returns intent string."""
     try:
         resp = _ollama.chat(
@@ -78,12 +81,21 @@ def _llm_classify(user_input: str) -> str:
         return None  # signal caller to use regex fallback
 
 
-def _regex_fastpath(text: str):
+def _regex_fastpath(text: str) -> Optional[str]:
     """Quick regex classification for unambiguous patterns. Returns intent or None."""
 
     # ---- Greetings (fast-path, very clear) ----
-    if re.search(r"^(hi+|hello|hey|howdy|good\s*(morning|afternoon|evening|night))[\s!,.*]*$", text):
+    if re.search(r"^(hi+(\s+there)?|hello(\s+there)?|hey(\s+there)?|howdy|good\s*(morning|afternoon|evening|night))[\s!,.*]*$", text):
         return "GREETING"
+
+    # ---- Short affirmatives / follow-up replies → CHAT ----
+    # Prevents "yes schedule it" from being routed to document search.
+    if re.search(
+        r"^(yes|yeah|no|nope|ok|okay|sure|please|go ahead|schedule it|yes please|"
+        r"confirm|do it|got it|sounds good|alright|nah|yep|yup)[\s!.,]*$",
+        text,
+    ):
+        return "CHAT"
 
     # ---- Pure conversational queries that have nothing to do with docs ----
     if re.search(
@@ -110,8 +122,40 @@ def _regex_fastpath(text: str):
         r"explain |define |what does .+ (mean|stand for))",
         text,
     ):
-        if not _DOC_KEYWORDS.search(text) and not re.search(r"\.(pdf|csv|docx?|xlsx?|txt|png|jpg|jpeg)\b", text):
+        if (
+            not _DOC_KEYWORDS.search(text)
+            and not re.search(r"\.(pdf|csv|docx?|xlsx?|txt|png|jpg|jpeg)\b", text)
+            # Do NOT short-circuit to CHAT for time/date/audio/document-content queries
+            and not re.search(r"\b(time|date|today|day|clock|hour|minute|second)\b", text)
+            and not re.search(r"\b(audio|recording|voice|transcript|spoken|said|topics?|themes?|subjects?|documents?|files?|knowledge)\b", text)
+        ):
             return "CHAT"
+
+    # ---- Explicit knowledge-base queries → RETRIEVAL ----
+    # Handles "Explain everything you know from the knowledge base" regardless of "you".
+    if re.search(r"\bknowledge.?base\b", text):
+        return "RETRIEVAL"
+
+    # ---- Document listing (checked BEFORE _DOC_KEYWORDS to prevent misrouting) ----
+    # Only matches queries that explicitly ask WHAT FILES EXIST — not content queries.
+    # "What is shown in the image document?" must NOT match here.
+    if re.search(r"\b(list|show|display)\b.{0,50}\b(documents?|files?|folder)\b", text) and \
+       not re.search(r"\b(audio|recording|voice|mp3|wav|m4a|flac)\b", text) or \
+       re.search(r"\bwhat\b.{0,30}\b(documents?|files?)\b.{0,50}\b(do (i|you) have|available|in (the )?(folder|directory|knowledge|kb))\b", text):
+        return "DOCUMENT_LIST"
+    if re.search(r"\b(list|show|display)\b.{0,30}\bknowledge.?base\b", text):
+        return "DOCUMENT_LIST"
+
+    # ---- Knowledge-base topic queries → RETRIEVAL ----
+    # Catch queries like "What skills were developed during the internship?" or
+    # "What budget was allocated for innovation?" that reference KB-specific terms.
+    if _DOC_KEYWORDS.search(text) and not re.search(r"\b(you|your|yourself)\b", text):
+        if re.search(
+            r"\b(what|which|who|when|where|how|why|tell|explain|describe|"
+            r"provide|detail|give|list|find)\b",
+            text,
+        ):
+            return "RETRIEVAL"
 
     # ---- Document / file-content queries → always RETRIEVAL ----
     # Matches queries that mention a file by extension OR use "mentioned in"/"according to"
@@ -145,9 +189,18 @@ def _regex_fastpath(text: str):
         if not re.search(r"\b(yourself|you)\b", text):
             return "RETRIEVAL"
 
+    # ---- Image / PNG file content queries → RETRIEVAL ----
+    # e.g. "describe the PNG file", "what does the image document show"
+    if re.search(r"\b(png|jpg|jpeg|gif|bmp)\b", text) or \
+       re.search(r"\bimage\s+(file|document|picture)\b", text):
+        return "RETRIEVAL"
+
     # ---- Audio ----
     if re.search(r"\b(transcribe|transcript|audio|recording|voice note|meeting recording|m4a|mp3|wav|flac)\b", text):
-        if re.search(r"\b(list|show|what|display|index(ed)?)\b", text):
+        # AUDIO_LIST only when user asks to *list/show* files, not when asking about audio content.
+        # Require "list/show/display" OR "what" followed by a files/catalog word (not questions about content).
+        if re.search(r"\b(list|show|display|index(ed)?)\b", text) or \
+           re.search(r"\bwhat\b.{0,25}\b(audio\s+files?|recordings?|indexed|clips?)\b", text):
             return "AUDIO_LIST"
         if re.search(r"\b(transcribe|index|upload|process|add|analyse|analyze)\b", text):
             return "AUDIO_TRANSCRIBE"
@@ -162,8 +215,15 @@ def _regex_fastpath(text: str):
         return "TIME" if "time" in text else "DATE"
 
     # ---- Reminders ----
-    if re.search(r"\b(remind|reminder|alarm|alert|notify me|set a reminder)\b", text):
-        if re.search(r"\b(list|show|what|display|check|upcoming|pending)\b", text):
+    # Standalone list patterns first (handles plurals without a trigger verb)
+    if re.search(r"\b(show|list|display|what|check)\b.{0,30}\b(reminders?|alarms?)\b", text):
+        if not re.search(r"\b(delete|remove|cancel|clear|set|add|create|schedule)\b", text):
+            return "REMINDER_LIST"
+    if re.search(r"\b(remind|reminders?|alarm|alarms?|alert|notify me|set a reminder)\b", text):
+        # "check" alone is too ambiguous (e.g. "remind me to check email").
+        # Only treat "check" as a list trigger when it refers to the reminders themselves.
+        if re.search(r"\b(list|show|what|display|upcoming|pending|history)\b", text) or \
+                re.search(r"\bcheck\s+(my\s+)?(reminders?|alarms?)\b", text, re.I):
             return "REMINDER_LIST"
         if re.search(r"\b(delete|remove|cancel|clear)\b", text):
             return "REMINDER_DELETE"
@@ -171,23 +231,27 @@ def _regex_fastpath(text: str):
 
     # ---- Email ----
     if re.search(r"\b(email|emails|mail|mails|inbox|sent|received)\b", text):
-        if re.search(r"\b(summar|overview|all emails|all mails|latest|recent|refresh|show all|list all)\b", text):
+        if re.search(r"\b(summar|overview|all emails|all mails|latest|recent|refresh|show all|list all)", text):
             return "EMAIL_SUMMARY"
         return "EMAIL_SEARCH"
 
-    # ---- Document listing ----
-    if re.search(r"\b(list|show|what|display)\b.*\b(documents?|files?)\b", text):
+    # ---- Topics (run BEFORE document listing to avoid misrouting) ----
+    if re.search(r"\b(topics?|themes?|subjects?|key points?|key themes?|main topics?)\b", text):
+        return "TOPIC"
+
+    # ---- Document listing (fallback — tighter than the early check above) ----
+    # Excluded: "what is shown in X", "what does X contain", "what is in the PDF" (content queries).
+    if re.search(r"\b(list|show|display)\b.{0,50}\b(documents?|files?|folder)\b", text):
+        return "DOCUMENT_LIST"
+    if re.search(r"\bwhat\b.{0,20}\b(documents?|files?)\b.{0,50}\b(do (i|you) have|available|in (the )?(folder|directory|knowledge|kb))\b", text):
         return "DOCUMENT_LIST"
 
     # ---- Summarise ----
-    if re.search(r"\b(summar|overview|brief|recap)\b", text):
+    # No trailing \b — allows matching summarize / summarise / summarization etc.
+    if re.search(r"\b(summar|overview|brief|recap)", text):
         if re.search(r"\b(email|mail|inbox|mails|emails)\b", text):
             return "EMAIL_SUMMARY"
         return "SUMMARY"
-
-    # ---- Topics ----
-    if re.search(r"\b(topics?|themes?|subjects?|key points?)\b", text):
-        return "TOPIC"
 
     # ---- Compare ----
     if re.search(r"\b(vs\.?|versus|compare|better than|pros and cons|difference between|which is (better|best|faster|easier))\b", text):
@@ -198,6 +262,8 @@ def _regex_fastpath(text: str):
 
 def decide_intent(user_input: str) -> str:
     text = user_input.strip().lower()
+    # Strip leading numbered-list prefix e.g. "3. Create meeting notes"
+    text = re.sub(r"^\d+\.\s*", "", text)
 
     # 1. Try unambiguous regex fast-path first (instant)
     fast = _regex_fastpath(text)
@@ -206,7 +272,9 @@ def decide_intent(user_input: str) -> str:
 
     # 2. Use LLM for everything else (handles all natural language)
     if _HAVE_OLLAMA:
-        result = _llm_classify(user_input)
+        # Pass cleaned input (no numbered prefix) to the LLM as well
+        clean_input = re.sub(r"^\d+\.\s*", "", user_input.strip())
+        result = _llm_classify(clean_input)
         if result:
             return result
 

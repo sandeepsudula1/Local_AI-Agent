@@ -1,0 +1,57 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+venv311/
+.venv/
+env/
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data / large binaries
+*.dll
+*.pyd
+*.so
+*.db
+*.sqlite3
+*.mp3
+*.mp4
+*.m4a
+*.wav
+*.flac
+*.ogg
+*.webm
+data/vector_store/
+data/vector_store_v2/
+data/vector_store_audio/
+data/audio/
+vector_store/
+local_ai_assistant/data/vector_store/
+local_ai_assistant/data/vector_store_v2/
+local_ai_assistant/data/vector_store_audio/
+local_ai_assistant/vector_store/
+
+# Logs / temp
+*.log
+*.tmp
+*.bak
+
+# Secrets / env
+.env
+*.env
+secrets.json
+
+# Windows shortcuts
+*.lnk

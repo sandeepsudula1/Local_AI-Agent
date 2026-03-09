@@ -70,6 +70,67 @@ def reminders_set(query: str) -> dict:
             "reminder_time": "",
         }
 
+    import re as _re
+
+    # ── Explicit "yesterday" guard ────────────────────────────────────────
+    # dateparser converts "yesterday at X" to a future time (today/tomorrow),
+    # so catch it before parsing to give the user a clear error.
+    if _re.search(r"\byesterday\b", query, _re.IGNORECASE):
+        return {
+            "success": False,
+            "message": (
+                "The requested time is in the past (yesterday).\n"
+                "Did you mean today or a specific future time? "
+                "Example: 'Remind me today at 5 PM' or 'Remind me tomorrow at 9 AM'."
+            ),
+            "reminder_text": "",
+            "reminder_time": "",
+        }
+
+    # ── Invalid time format guard ─────────────────────────────────────────
+    # Reject obviously impossible times like 25:00, 99:30, etc.
+    _invalid_time = _re.search(r"\b([2-9]\d|1\d{2,})\s*:\s*\d{2}\b", query)
+    if _invalid_time:
+        return {
+            "success": False,
+            "message": (
+                f"Invalid time '{_invalid_time.group()}'. "
+                "Hours must be 0–23 and minutes 0–59. "
+                "Example: 'Remind me at 14:30' or 'at 9 AM'."
+            ),
+            "reminder_text": "",
+            "reminder_time": "",
+        }
+
+    # ── Past-time guard ───────────────────────────────────────────────────
+    # Parse the time first so we can warn the user before saving a reminder
+    # that is already in the past (e.g. "remind me yesterday at 5 PM").
+    _preview_text, _preview_time = extract_reminder_details(query.strip())
+    if _preview_time:
+        try:
+            from datetime import datetime, timedelta
+            _parsed_dt = None
+            for _fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                try:
+                    _parsed_dt = datetime.strptime(_preview_time, _fmt)
+                    break
+                except ValueError:
+                    pass
+            if _parsed_dt and _parsed_dt < datetime.now() - timedelta(minutes=5):
+                _next = _parsed_dt + timedelta(days=1)
+                return {
+                    "success": False,
+                    "message": (
+                        f"The requested reminder time ({_preview_time}) is already in the past.\n"
+                        f"Do you want me to schedule it for the next available time instead? "
+                        f"(e.g. {_next.strftime('%Y-%m-%d %H:%M')})"
+                    ),
+                    "reminder_text": _preview_text or "",
+                    "reminder_time": _preview_time,
+                }
+        except Exception:
+            pass  # If check fails, fall through and let the normal flow handle it
+
     # handle_set_reminder supports multiple reminders separated by ';'
     success, msg = handle_set_reminder(query.strip())
     if success:

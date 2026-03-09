@@ -86,6 +86,13 @@ def _schedule_single(reminder):
         # schedule very shortly to allow process scheduling and avoid immediate popup
         delay = max(delay, 0.5)
 
+    # Cap delay to avoid OverflowError in threading.Timer for far-future reminders.
+    # The background poller (chat.py / smart_agent.py) will handle delivery
+    # when the reminder's time finally arrives.
+    _MAX_TIMER_DELAY = 7 * 24 * 3600  # 7 days
+    if delay > _MAX_TIMER_DELAY:
+        return True
+
     timer = threading.Timer(delay, lambda: _notify("Reminder", reminder.get("text", "Reminder")))
     timer.daemon = True
     timer.start()

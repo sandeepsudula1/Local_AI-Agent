@@ -10,8 +10,15 @@ Usage: from agents.tasks.notification_agent import notify
 import os
 import logging
 
+_HAS_PLYER = False
 _HAS_WINRT = False
 _HAS_WIN10TOAST = False
+
+try:
+	from plyer import notification as _plyer_notification
+	_HAS_PLYER = True
+except Exception:
+	_HAS_PLYER = False
 
 try:
 	from winrt.windows.ui.notifications import ToastNotificationManager, ToastNotification
@@ -23,7 +30,11 @@ except Exception:
 try:
 	from win10toast import ToastNotifier
 	_toaster = ToastNotifier()
-	_HAS_WIN10TOAST = True
+	# win10toast's internal message-pump thread returns None from its WNDPROC
+	# callback on some Windows/PyWin32 versions, which throws an uncatchable
+	# "WPARAM is simple, so must be an int" TypeError in that thread.
+	# Disable it here and let the console fallback handle notifications.
+	_HAS_WIN10TOAST = False
 except Exception:
 	_HAS_WIN10TOAST = False
 
@@ -65,7 +76,20 @@ def notify(title: str, msg: str, duration: int = 5):
 
 	Returns True if a native notification was attempted, False otherwise.
 	"""
-	# Prefer winrt (native Windows Notification API)
+	# Prefer plyer (reliable cross-platform Windows notifications)
+	if _HAS_PLYER:
+		try:
+			_plyer_notification.notify(
+				title=title,
+				message=msg,
+				timeout=duration,
+				app_name="AI Assistant",
+			)
+			return True
+		except Exception:
+			pass
+
+	# Fallback: winrt (native Windows Notification API)
 	if _HAS_WINRT:
 		ok = _show_winrt(title, msg)
 		if ok:

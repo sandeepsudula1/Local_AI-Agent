@@ -188,9 +188,27 @@ class MCPBridge:
                 src = result.get("source", "")
                 ans = result["answer"]
                 return f"{ans}\n(Source: {src})" if src else ans
-            return None  # let smart_agent fallback handle it
+            return "No relevant information found in the documents."
 
         if intent == "SUMMARY":
+            import re as _re
+            # If the user names a specific document/report, search it instead of
+            # summarising all documents (e.g. "Summarize the internship report").
+            _specific_doc = _re.search(
+                r'\bthe\s+\w+\s+(report|document|file|data|notes?|plan|strategy|analysis)\b'
+                r'|\w+\.(pdf|csv|docx?|xlsx?|txt)\b',
+                user_input, _re.IGNORECASE,
+            )
+            if _specific_doc and not _re.search(r'\b(all|every|entire|both)\b', user_input, _re.IGNORECASE):
+                fn_srch, _, _, _ = _import_documents()
+                result = fn_srch(user_input)
+                if raw:
+                    return result
+                if result.get("success") and result.get("answer"):
+                    src = result.get("source", "")
+                    ans = result["answer"]
+                    return f"{ans}\n(Source: {src})" if src else ans
+                return "No relevant information found in the documents."
             _, fn_sum, _, _ = _import_documents()
             result = fn_sum()
             return result if raw else result.get("summary", "Could not summarise.")
@@ -202,8 +220,51 @@ class MCPBridge:
 
         # ── AUDIO ─────────────────────────────────────────────────────────
         if intent == "AUDIO_TRANSCRIBE":
+            import re as _re
+            # Strip leading numbered-list prefix e.g. "1. Transcribe ..."
+            _file_arg = _re.sub(r"^\d+\.\s*", "", user_input.strip()).strip()
+            # Strip leading command verb
+            _file_arg = _re.sub(
+                r"^(transcribe|upload|index|add|process|convert|load)\s+",
+                "",
+                _file_arg,
+                flags=_re.IGNORECASE,
+            ).strip()
+            # Strip leading noise qualifiers: "file", "the", "audio", "this", etc.
+            _file_arg = _re.sub(
+                r"^(this\s+|the\s+|audio\s+file\s+|audio\s+|voice\s+note\s+|"
+                r"file\s+|following\s+|my\s+)+",
+                "",
+                _file_arg,
+                flags=_re.IGNORECASE,
+            ).strip()
+            # Strip trailing noise: "audio file", "voice note", "file", "please"
+            _file_arg = _re.sub(
+                r"\s+(audio\s+file|voice\s+note|file|please)[\s.,]*$",
+                "",
+                _file_arg,
+                flags=_re.IGNORECASE,
+            ).strip()
+            # If an audio extension is present, keep only the filename portion
+            ext_match = _re.search(
+                r'(.+\.(mp[34]|wav|m4a|flac|ogg|webm))',
+                _file_arg,
+                _re.IGNORECASE,
+            )
+            if ext_match:
+                _file_arg = ext_match.group(1).strip()
+            else:
+                # No audio extension found — user didn't specify a filename
+                _, _, fn_lst = _import_audio()
+                lst = fn_lst()
+                files_msg = lst.get("message", "")
+                return (
+                    "No audio filename was specified.\n"
+                    "Please provide the filename, e.g.: 'Transcribe meeting.mp3'\n"
+                    + (f"\n{files_msg}" if files_msg else "")
+                )
             fn_tx, _, _ = _import_audio()
-            result = fn_tx(user_input.strip())
+            result = fn_tx(_file_arg)
             if raw:
                 return result
             if result.get("success"):

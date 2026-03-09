@@ -175,22 +175,30 @@ documents = []
 if os.path.exists(DOCS_PATH):
     for file in os.listdir(DOCS_PATH):
         full_path = os.path.join(DOCS_PATH, file)
+        try:
+            if file.endswith(".pdf"):
+                loader = PyPDFLoader(full_path)
+                for doc in loader.load():
+                    doc.metadata["source"] = file
+                    documents.append(doc)
 
-        if file.endswith(".pdf"):
-            loader = PyPDFLoader(full_path)
-            for doc in loader.load():
-                doc.metadata["source"] = file
-                documents.append(doc)
+            elif file.endswith(".csv"):
+                df = pd.read_csv(full_path)
+                for _, row in df.iterrows():
+                    row_text = ", ".join([f"{col}: {row[col]}" for col in df.columns])
+                    documents.append(Document(page_content=row_text, metadata={"source": file}))
 
-        elif file.endswith(".csv"):
-            df = pd.read_csv(full_path)
-            for _, row in df.iterrows():
-                row_text = ", ".join([f"{col}: {row[col]}" for col in df.columns])
-                documents.append(Document(page_content=row_text, metadata={"source": file}))
-
-        elif file.endswith((".png", ".jpg", ".jpeg")):
-            extracted = pytesseract.image_to_string(Image.open(full_path))
-            documents.append(Document(page_content=extracted, metadata={"source": file}))
+            elif file.endswith((".png", ".jpg", ".jpeg")):
+                try:
+                    extracted = pytesseract.image_to_string(Image.open(full_path)).strip()
+                    if extracted:
+                        documents.append(Document(page_content=extracted, metadata={"source": file}))
+                    else:
+                        print(f"[Info] No OCR text extracted from {file}; image skipped from index.")
+                except Exception as _ocr_err:
+                    print(f"[Warning] OCR failed for {file}: {_ocr_err} — image skipped from index.")
+        except Exception as _load_err:
+            print(f"[Warning] Could not load {file}: {_load_err}")
 
 print(f"Loaded {len(documents)} document(s).")
 
@@ -210,6 +218,21 @@ def _print_progress(msg: str):
     pass  # internal messages suppressed — only show key status to user
 
 
+def _docs_newer_than_vector_store() -> bool:
+    """Return True if any document was modified after the persisted vector store was built."""
+    db_file = os.path.join(VECTOR_STORE_PATH, "chroma.sqlite3")
+    if not os.path.exists(db_file):
+        return True
+    store_mtime = os.path.getmtime(db_file)
+    if not os.path.exists(DOCS_PATH):
+        return False
+    for fname in os.listdir(DOCS_PATH):
+        fpath = os.path.join(DOCS_PATH, fname)
+        if os.path.isfile(fpath) and os.path.getmtime(fpath) > store_mtime:
+            return True
+    return False
+
+
 def load_vector_store_background():
     global vector_db, vector_ready, vector_loading, vector_progress
     vector_loading = True
@@ -222,6 +245,14 @@ def load_vector_store_background():
             model_kwargs={"device": "cpu"}
         )
         vector_progress = 15
+
+        # Force rebuild when any document is newer than the persisted vector store
+        if _docs_newer_than_vector_store() and os.path.exists(VECTOR_STORE_PATH):
+            print("[Info] Documents changed — rebuilding vector store from scratch...")
+            try:
+                shutil.rmtree(VECTOR_STORE_PATH)
+            except Exception as _rm_err:
+                print(f"[Warning] Could not remove old vector store: {_rm_err}")
 
         # If persisted store exists, try loading
         if os.path.exists(VECTOR_STORE_PATH) and any(os.scandir(VECTOR_STORE_PATH)):
@@ -376,16 +407,18 @@ def handle_system_query(user_input):
 def _to_bullets(text: str, max_bullets: int = 5):
     if not text:
         return []
-    # Split into simple sentences and prefer the longest informative ones
-    parts = [p.strip() for p in re.split(r'[\n\r]+|(?<=[\.\?\!])\s+', text) if p.strip()]
-    # Sort by length to prefer substantive lines, but keep original order for top picks
+    # Split into simple sentences
+    parts = [p.strip() for p in re.split(r'[\n\r]+|(?<=[\.[\?\!])\s+', text) if p.strip()]
     bullets = []
+    seen_lower: set = set()
     for p in parts:
         if len(bullets) >= max_bullets:
             break
-        # short clean-up
+        # short clean-up and deduplication
         s = p.replace('\n', ' ').strip()
-        if s:
+        s_key = s.lower()
+        if s and s_key not in seen_lower:
+            seen_lower.add(s_key)
             bullets.append(s)
     return bullets
 
@@ -812,3 +845,4 @@ while True:
     # FALLBACK (LLM)
     # ======================================
     print("Assistant:", handle_general(user_input, MODEL_NAME), "\n")
+    

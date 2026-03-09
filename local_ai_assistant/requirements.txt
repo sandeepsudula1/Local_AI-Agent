@@ -1,0 +1,54 @@
+# requirements.txt
+# Generated from venv311 — pinned versions known to work on Python 3.11 / Windows
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# ── LLM / Embeddings ────────────────────────────────────────────────────────
+ollama==0.6.1
+sentence-transformers==5.2.3
+transformers==5.2.0
+huggingface_hub==1.4.1
+torch==2.10.0
+
+# ── Vector store ─────────────────────────────────────────────────────────────
+chromadb==1.5.0
+
+# ── LangChain ────────────────────────────────────────────────────────────────
+langchain==0.1.12
+langchain-community==0.0.29
+langchain-core==0.1.53
+langchain-text-splitters==0.0.2
+
+# ── Data / documents ─────────────────────────────────────────────────────────
+pandas==3.0.1
+numpy==1.26.4
+scipy==1.17.0
+Pillow==12.1.1
+pytesseract==0.3.13
+
+# ── Email ────────────────────────────────────────────────────────────────────
+IMAPClient==3.1.0
+
+# ── Notifications ────────────────────────────────────────────────────────────
+plyer==2.1.0
+pywin32==311
+# win10toast is kept as a fallback but plyer is the primary notification backend
+win10toast==0.9
+
+# ── NLP / date parsing ───────────────────────────────────────────────────────
+dateparser==1.3.0
+
+# ── Config / validation ──────────────────────────────────────────────────────
+pydantic==2.12.5
+pydantic-settings==2.13.1
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+requests==2.32.5
+tqdm==4.67.3
+click==8.3.1
+typing_extensions==4.15.0
+
+# ── Testing ──────────────────────────────────────────────────────────────────
+pytest>=7.0
+pytest-mock>=3.0

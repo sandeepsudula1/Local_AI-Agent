@@ -71,7 +71,20 @@ def _get_vector_db():
                 model_kwargs={"device": "cpu"},
             )
 
-            if os.path.exists(_VECTOR_STORE_PATH) and any(os.scandir(_VECTOR_STORE_PATH)):
+            # Force rebuild if any document is newer than the persisted store
+            _db_file = os.path.join(_VECTOR_STORE_PATH, "chroma.sqlite3")
+            _store_exists = os.path.exists(_VECTOR_STORE_PATH) and any(os.scandir(_VECTOR_STORE_PATH))
+            if _store_exists and os.path.exists(_db_file) and os.path.exists(_DOCS_PATH):
+                _store_mtime = os.path.getmtime(_db_file)
+                for _fn in os.listdir(_DOCS_PATH):
+                    _fp = os.path.join(_DOCS_PATH, _fn)
+                    if os.path.isfile(_fp) and os.path.getmtime(_fp) > _store_mtime:
+                        import shutil as _shutil
+                        _shutil.rmtree(_VECTOR_STORE_PATH, ignore_errors=True)
+                        _store_exists = False
+                        break
+
+            if _store_exists:
                 _vector_db = Chroma(
                     persist_directory=_VECTOR_STORE_PATH,
                     embedding_function=emb,
@@ -125,6 +138,21 @@ def _load_raw_documents() -> list:
             elif fname.endswith(".txt"):
                 text = open(fpath, "r", encoding="utf-8", errors="ignore").read()
                 docs.append(Document(page_content=text, metadata={"source": fname}))
+            elif fname.lower().endswith((".png", ".jpg", ".jpeg")):
+                # Try OCR ingestion; skip silently if Tesseract is not installed.
+                # To index images, delete data/vector_store_v2/ and restart so
+                # the vector store rebuilds with OCR content.
+                try:
+                    import pytesseract
+                    from PIL import Image as _PILImage
+                    pytesseract.pytesseract.tesseract_cmd = (
+                        r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+                    )
+                    ocr_text = pytesseract.image_to_string(_PILImage.open(fpath)).strip()
+                    if ocr_text:
+                        docs.append(Document(page_content=ocr_text, metadata={"source": fname}))
+                except Exception:
+                    pass  # OCR unavailable — image skipped during indexing
         except Exception:
             pass
 
@@ -319,17 +347,21 @@ def documents_list() -> dict:
     except Exception as exc:
         summary = f"Could not list documents: {exc}"
 
+    _DOC_EXTS = {'.pdf', '.csv', '.txt', '.docx', '.doc', '.xlsx', '.xls', '.png', '.jpg', '.jpeg'}
     files: list[dict] = []
     if os.path.exists(_DOCS_PATH):
         for fname in sorted(os.listdir(_DOCS_PATH)):
             fpath = os.path.join(_DOCS_PATH, fname)
-            if os.path.isfile(fpath):
-                try:
-                    size_kb = round(os.path.getsize(fpath) / 1024, 1)
-                except Exception:
-                    size_kb = 0.0
-                _, ext = os.path.splitext(fname)
-                files.append({"name": fname, "ext": ext.lower(), "size_kb": size_kb})
+            if not os.path.isfile(fpath):
+                continue
+            _, ext = os.path.splitext(fname)
+            if ext.lower() not in _DOC_EXTS:
+                continue
+            try:
+                size_kb = round(os.path.getsize(fpath) / 1024, 1)
+            except Exception:
+                size_kb = 0.0
+            files.append({"name": fname, "ext": ext.lower(), "size_kb": size_kb})
 
     return {
         "success": True,

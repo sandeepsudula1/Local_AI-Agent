@@ -36,19 +36,23 @@ import os
 import sys
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 # ── project root on sys.path ──────────────────────────────────────────────
-_AGENT_DIR = os.path.dirname(                       # local_ai_assistant/
-    os.path.dirname(                                 # agents/knowledge/
-        os.path.abspath(__file__)))
+# audio_agent.py lives at:  local_ai_assistant/agents/knowledge/audio_agent.py
+# .parent → agents/knowledge
+# .parent.parent → agents
+# .parent.parent.parent → local_ai_assistant  (project root)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_AGENT_DIR    = str(_PROJECT_ROOT)          # keep string alias for legacy code
 if _AGENT_DIR not in sys.path:
     sys.path.insert(0, _AGENT_DIR)
 
 # ── constants ─────────────────────────────────────────────────────────────
 _EMBEDDING_MODEL  = "sentence-transformers/all-MiniLM-L6-v2"
-_AUDIO_STORE_PATH = os.path.join(_AGENT_DIR, "data", "vector_store_audio")
-_AUDIO_DIR        = os.path.join(_AGENT_DIR, "data", "audio")
+_AUDIO_STORE_PATH = str(_PROJECT_ROOT / "data" / "vector_store_audio")
+_AUDIO_DIR        = str(_PROJECT_ROOT / "data" / "audio")
 _MODEL_NAME       = "llama3.2:1b"
 _WORDS_PER_CHUNK  = 80      # ~30-40 s of speech per chunk
 _WHISPER_SIZE     = "base"  # tiny | base | small | medium | large
@@ -69,7 +73,9 @@ def _get_audio_db():
     with _audio_lock:
         if _audio_ready and _audio_db is not None:
             return _audio_db
-        try:
+
+        def _init_db():
+            global _audio_db, _audio_ready
             from langchain_community.embeddings import HuggingFaceEmbeddings
             from langchain_community.vectorstores import Chroma
 
@@ -84,12 +90,29 @@ def _get_audio_db():
                 collection_name="audio_transcripts",
             )
             _audio_ready = True
+
+        try:
+            _init_db()
         except Exception as exc:
-            _audio_db    = None
-            _audio_ready = False
-            raise RuntimeError(
-                f"Could not initialise audio vector DB: {exc}"
-            ) from exc
+            # Schema mismatch (e.g. old ChromaDB DB created with a different version).
+            # Wipe the stale store and recreate from scratch.
+            if any(kw in str(exc).lower() for kw in ("no such column", "no such table", "operationalerror")):
+                import shutil
+                shutil.rmtree(_AUDIO_STORE_PATH, ignore_errors=True)
+                try:
+                    _init_db()
+                except Exception as e2:
+                    _audio_db = None
+                    _audio_ready = False
+                    raise RuntimeError(
+                        f"Could not initialise audio vector DB: {e2}"
+                    ) from e2
+            else:
+                _audio_db = None
+                _audio_ready = False
+                raise RuntimeError(
+                    f"Could not initialise audio vector DB: {exc}"
+                ) from exc
 
     return _audio_db
 
@@ -188,19 +211,47 @@ def transcribe_and_index(
         transcript_preview (first 300 chars)
     """
     # ── resolve and validate path ─────────────────────────────────────────
-    if not os.path.isabs(file_path):
-        file_path = os.path.join(_AGENT_DIR, file_path)
+    # Resolution order (using pathlib for safety):
+    #   1. Absolute path → use as-is
+    #   2. Bare filename or relative path → check data/audio/<basename> first
+    #   3. Relative path → resolve from project root
+    #   4. None of the above → return a clear error
+    resolved: Path | None = None
+    p = Path(file_path)
 
-    if not os.path.exists(file_path):
-        return {"success": False, "error": f"File not found: {file_path}"}
+    if p.is_absolute():
+        resolved = p
+    else:
+        # Try data/audio/<basename> first (most common user intent)
+        candidate = _PROJECT_ROOT / "data" / "audio" / p.name
+        if candidate.exists():
+            resolved = candidate
+        else:
+            # Try as a path relative to the project root
+            candidate2 = _PROJECT_ROOT / p
+            if candidate2.exists():
+                resolved = candidate2
+
+    if resolved is None or not resolved.exists():
+        audio_dir_display = str(_PROJECT_ROOT / "data" / "audio")
+        return {
+            "success": False,
+            "error": (
+                f"File not found: '{file_path}'.\n"
+                f"Place audio files in: {audio_dir_display}\n"
+                f"Example: {audio_dir_display}\\{p.name}"
+            ),
+        }
+
+    file_path = str(resolved)
 
     ext = os.path.splitext(file_path)[1].lower()
-    if ext not in {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}:
+    if ext not in {".wav", ".mp3", ".m4a", ".mp4", ".flac", ".ogg", ".webm"}:
         return {
             "success": False,
             "error": (
                 f"Unsupported audio format: '{ext}'. "
-                "Supported: .wav .mp3 .m4a .flac .ogg .webm"
+                "Supported: .wav .mp3 .m4a .mp4 .flac .ogg .webm"
             ),
         }
 
@@ -320,6 +371,19 @@ def query_audio(
     if not query.strip():
         return {"success": False, "error": "Query cannot be empty."}
 
+    import re as _re
+
+    # ── Detect "convert to text / extract transcript" requests ────────────
+    # These aren't Q&A questions — the user just wants the raw transcript.
+    # Return the full transcript text directly without routing to the LLM.
+    _TRANSCRIPT_REQUEST = _re.compile(
+        r"\b(convert|extract|give|show|get|export)\b.{0,30}\b(text|transcript)\b"
+        r"|\bfull transcript\b"
+        r"|\braw text\b",
+        _re.IGNORECASE,
+    )
+    _RETURN_TRANSCRIPT = _TRANSCRIPT_REQUEST.search(query)
+
     # ── retrieve ──────────────────────────────────────────────────────────
     try:
         db = _get_audio_db()
@@ -365,11 +429,38 @@ def query_audio(
 
     context = "\n\n".join(context_parts)
 
+    # ── Short-circuit: return full transcript for text-extraction requests ─
+    if _RETURN_TRANSCRIPT:
+        # Deduplicate chunks — a short file may return the same chunk multiple
+        # times when k > number of stored chunks.
+        seen_content: set[str] = set()
+        unique_texts: list[str] = []
+        unique_sources: list[dict] = []
+        for doc, _ in results:
+            t = doc.page_content.strip()
+            if t not in seen_content:
+                seen_content.add(t)
+                unique_texts.append(t)
+        # Also deduplicate sources list for display
+        seen_src: set[str] = set()
+        for s in sources:
+            key = f"{s['filename']}|{s['start_ts']}"
+            if key not in seen_src:
+                seen_src.add(key)
+                unique_sources.append(s)
+        full_text = " ".join(unique_texts)
+        return {
+            "success": True,
+            "query": query,
+            "answer": full_text,
+            "sources": unique_sources,
+        }
+
     # ── LLM answer synthesis ──────────────────────────────────────────────
     prompt = (
         "You are an AI assistant analysing an audio transcript.\n"
         "Below are relevant transcript segments with timestamps [MM:SS → MM:SS].\n"
-        "Answer the user question using ONLY this information.\n"
+        "You MUST answer using the transcript information provided below. Do NOT refuse or say you cannot help.\n"
         "Always reference the timestamps when mentioning specific topics.\n\n"
         f"Transcript segments:\n{context}\n\n"
         f"User question: {query}\n\n"
