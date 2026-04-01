@@ -543,3 +543,112 @@ def list_audio_files() -> dict:
 
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Thin handler wrappers — called by core/tool_executor.py
+# ---------------------------------------------------------------------------
+
+def handle_audio_transcription(user_input: str) -> str:
+    """Extract a file path from *user_input* and transcribe it.
+
+    Returns a human-readable result string.
+    """
+    import re as _re
+    # Try to pull out a file path or filename from the query
+    m = _re.search(
+        r'[\w:/\\][\w:/\\\-\.\s]*\.(?:mp3|wav|m4a|mp4|ogg|flac)',
+        user_input,
+        _re.IGNORECASE,
+    )
+    if not m:
+        return (
+            "Audio processing is currently unavailable due to a system error. "
+            "Please specify the full path to the audio file (e.g. C:\\audio\\meeting.mp3)."
+        )
+    file_path = m.group(0).strip()
+    # Strip leading command verbs captured by the greedy regex
+    # e.g. "transcribe WhatsApp Audio ..." → "WhatsApp Audio ..."
+    _COMMAND_PREFIX = _re.compile(
+        r'^(?:transcribe|convert|process|analyze|analyse|index|play|open|load|upload|record)\s+',
+        _re.IGNORECASE,
+    )
+    file_path = _COMMAND_PREFIX.sub('', file_path).strip()
+    result = transcribe_and_index(file_path)
+    if not result.get("success"):
+        err = result.get("error", "unknown error")
+        return (
+            "Audio processing is currently unavailable due to a system error. "
+            f"Details: {err}. Please try again later."
+        )
+    return (
+        f"Transcription complete for '{result['filename']}'.\n"
+        f"Duration: {result['duration']} | Segments: {result['segments']} | "
+        f"Chunks indexed: {result['chunks_stored']}\n\n"
+        f"Preview:\n{result['transcript_preview']}"
+    )
+
+
+def handle_audio_query(user_input: str) -> str:
+    """Answer a question about indexed audio content.
+
+    When the user mentions a specific audio filename, the query is restricted
+    to that file only.  If that file has not been indexed yet the user gets a
+    clear "not yet transcribed" message instead of an answer from a different
+    file.
+
+    Returns a human-readable answer string.
+    """
+    import re as _re
+    # Detect a specific audio filename in the query
+    _fname_match = _re.search(
+        r'[\w][\w\s\-\.]*\.(?:mp3|wav|m4a|mp4|ogg|flac)',
+        user_input,
+        _re.IGNORECASE,
+    )
+    filename_filter: Optional[str] = None
+    if _fname_match:
+        filename_filter = _fname_match.group(0).strip()
+        # Strip leading command verbs captured by the greedy regex
+        _QCMD_PREFIX = _re.compile(
+            r'^(?:query|search|ask|find|play|transcribe|analyze|about|from|in)\s+',
+            _re.IGNORECASE,
+        )
+        filename_filter = _QCMD_PREFIX.sub('', filename_filter).strip()
+
+    result = query_audio(user_input, filename=filename_filter)
+    if not result.get("success"):
+        err = result.get("error", "unknown error")
+        # Specific file not indexed yet — give a helpful message
+        if filename_filter and "no audio transcript" in err.lower():
+            return (
+                f"'{filename_filter}' has not been transcribed yet. "
+                "Use the transcribe command first to index it, then ask your question."
+            )
+        return (
+            "Audio processing is currently unavailable due to a system error. "
+            f"Details: {err}. Please try again later."
+        )
+    answer = result.get("answer", "").strip()
+    sources = result.get("sources", [])
+    if not answer:
+        return "No information found in the indexed audio files."
+    if sources:
+        src_lines = "\n".join(
+            f"  [{s['start_ts']} → {s['end_ts']}] {s['filename']} — {s['snippet']}"
+            for s in sources[:3]
+        )
+        return f"{answer}\n\nSources:\n{src_lines}"
+    return answer
+
+
+def handle_audio_list(user_input: str) -> str:  # noqa: ARG001
+    """Return a formatted list of indexed audio files."""
+    result = list_audio_files()
+    if not result.get("success"):
+        err = result.get("error", "unknown error")
+        return (
+            "Audio processing is currently unavailable due to a system error. "
+            f"Details: {err}. Please try again later."
+        )
+    return result.get("message", "No audio files found.")

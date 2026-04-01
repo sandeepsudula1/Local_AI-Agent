@@ -119,10 +119,10 @@ class Settings:
         default_factory=lambda: _env_float("RETRIEVAL_THRESHOLD", 1.5)
     )
     chunk_size: int = field(
-        default_factory=lambda: _env_int("CHUNK_SIZE", 800)
+        default_factory=lambda: _env_int("CHUNK_SIZE", 1500)
     )
     chunk_overlap: int = field(
-        default_factory=lambda: _env_int("CHUNK_OVERLAP", 80)
+        default_factory=lambda: _env_int("CHUNK_OVERLAP", 150)
     )
 
     # ── Documents ────────────────────────────────────────────────────────────
@@ -159,13 +159,84 @@ class Settings:
         default_factory=lambda: _env_int("EMAIL_FETCH_COUNT", 200)
     )
 
-    # ── Audio ────────────────────────────────────────────────────────────────
+    # Email semantic search settings
+    email_vector_store_path: Path = field(
+        default_factory=lambda: PROJECT_ROOT / _env(
+            "EMAIL_VECTOR_STORE_PATH", "data/vector_store_email"
+        )
+    )
+    email_embedding_model: str = field(
+        default_factory=lambda: _env(
+            "EMAIL_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+        )
+    )
+    email_semantic_k: int = field(
+        default_factory=lambda: _env_int("EMAIL_SEMANTIC_K", 10)
+    )
+    email_semantic_threshold: float = field(
+        default_factory=lambda: _env_float("EMAIL_SEMANTIC_THRESHOLD", 0.4)
+    )
+    email_sync_interval_hours: int = field(
+        default_factory=lambda: _env_int("EMAIL_SYNC_INTERVAL_HOURS", 6)
+    )
+    email_hybrid_semantic_weight: float = field(
+        default_factory=lambda: _env_float("EMAIL_HYBRID_SEMANTIC_WEIGHT", 0.7)
+    )
+
+    # Email sending (SMTP) settings — used by email.reply and email.send tools
+    # Configure your email provider's SMTP settings:
+    # - Gmail: host=smtp.gmail.com, port=587, use_tls=true (requires app password)
+    # - Outlook: host=smtp.live.com, port=587, use_tls=true
+    # - Custom: set your provider's SMTP server details
+    email_host: str = field(
+        default_factory=lambda: _env("EMAIL_HOST", "")
+    )
+    email_port: int = field(
+        default_factory=lambda: _env_int("EMAIL_PORT", 587)
+    )
+    email_user: str = field(
+        default_factory=lambda: _env("EMAIL_USER", "")
+    )
+    email_password: str = field(
+        default_factory=lambda: _env("EMAIL_PASS", "")
+    )
+    email_from: str = field(
+        default_factory=lambda: _env("EMAIL_FROM", "")
+    )
+    email_tls_enabled: bool = field(
+        default_factory=lambda: _env_bool("EMAIL_TLS", True)
+    )
     audio_path: Path = field(
         default_factory=lambda: PROJECT_ROOT / _env("AUDIO_PATH", "data/audio")
     )
     audio_vector_store_path: Path = field(
         default_factory=lambda: PROJECT_ROOT / _env(
             "AUDIO_VECTOR_STORE_PATH", "data/vector_store_audio"
+        )
+    )
+
+    # ── Windows Documents indexer ─────────────────────────────────────────────
+    # Only C:\AI_Test_Documents is the authorised indexed folder.
+    # C:\Users\Sandeep\OneDrive\Documents is intentionally NOT indexed.
+    windows_docs_path: Path = field(
+        default_factory=lambda: Path(_env(
+            "WINDOWS_DOCS_PATH",
+            r"C:\AI_Test_Documents",
+        ))
+    )
+    windows_docs_vector_store_path: Path = field(
+        default_factory=lambda: PROJECT_ROOT / _env(
+            "WINDOWS_DOCS_VECTOR_STORE_PATH", "data/vector_store_win_docs"
+        )
+    )
+    # Comma-separated subfolder names relative to windows_docs_path to restrict
+    # the scan.  Empty string (default) = scan the entire Documents folder.
+    # Example in .env:  WINDOWS_DOCS_SUBFOLDERS=Work,Projects/AI
+    windows_docs_subfolders: tuple = field(
+        default_factory=lambda: tuple(
+            s.strip()
+            for s in _env("WINDOWS_DOCS_SUBFOLDERS", "").split(",")
+            if s.strip()
         )
     )
 
@@ -185,6 +256,13 @@ class Settings:
     )
     log_format: str = field(
         default_factory=lambda: _env("LOG_FORMAT", "text")  # "text" | "json"
+    )
+
+    # ── User identity ────────────────────────────────────────────────────────
+    # Used as the reply signature in generated email drafts.
+    # Override via USER_NAME env var or .env:  USER_NAME=Alice
+    user_name: str = field(
+        default_factory=lambda: _env("USER_NAME", "Sandeep")
     )
 
     # ── MCP ──────────────────────────────────────────────────────────────────

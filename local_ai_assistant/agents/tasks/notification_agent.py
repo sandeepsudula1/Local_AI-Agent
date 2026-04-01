@@ -101,6 +101,34 @@ def notify(title: str, msg: str, duration: int = 5):
 		if ok:
 			return True
 
+	# Fallback: PowerShell toast (no extra package required on Windows)
+	try:
+		import subprocess as _sp
+		_title = title.replace("'", "''").replace('"', '`"')
+		_msg   = msg.replace("'", "''").replace('"', '`"')
+		ps_cmd = (
+			"[void][Windows.UI.Notifications.ToastNotificationManager,"
+			" Windows.UI.Notifications, ContentType=WindowsRuntime];"
+			"[void][Windows.Data.Xml.Dom.XmlDocument,"
+			" Windows.Data.Xml.Dom, ContentType=WindowsRuntime];"
+			"$t=[Windows.UI.Notifications.ToastTemplateType]::ToastText02;"
+			"$xml=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($t);"
+			"$nodes=$xml.GetElementsByTagName('text');"
+			f"$nodes.Item(0).AppendChild($xml.CreateTextNode('{_title}'))|Out-Null;"
+			f"$nodes.Item(1).AppendChild($xml.CreateTextNode('{_msg}'))|Out-Null;"
+			"$toast=[Windows.UI.Notifications.ToastNotification]::new($xml);"
+			"$notifier=[Windows.UI.Notifications.ToastNotificationManager]::"
+			"CreateToastNotifier('AI Assistant');"
+			"$notifier.Show($toast)"
+		)
+		_sp.Popen(
+			["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+			stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+		)
+		return True
+	except Exception:
+		pass
+
 	# final fallback: console
 	print(f"[Notification] {title}: {msg}")
 	return False

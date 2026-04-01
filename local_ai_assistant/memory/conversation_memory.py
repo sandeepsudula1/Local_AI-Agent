@@ -84,6 +84,12 @@ class ConversationMemory:
         self._max_history = max_history
         self._persist_path = persist_path
         self._lock = threading.Lock()
+        # Session-only context — never persisted
+        self._last_file: Optional[str] = None
+        self._last_intent: Optional[str] = None
+        self._last_folder: Optional[str] = None
+        self._pending_query: Optional[str] = None  # query awaiting folder clarification
+        self._last_email_search_results: list[dict] = []  # email search context for reply generation
 
         if persist_path and Path(persist_path).exists():
             self._load()
@@ -113,6 +119,40 @@ class ConversationMemory:
             self._facts.clear()
             self._persist()
 
+    # ── Session context (last referenced file) ─────────────────────────────
+
+    def set_last_file(self, filename: str) -> None:
+        """Record the last file the user asked about (session-only, not persisted)."""
+        with self._lock:
+            self._last_file = filename
+            log.debug("Memory: last_file set to %r", filename)
+
+    def get_last_file(self) -> Optional[str]:
+        """Return the filename referenced in the most recent retrieval turn, or None."""
+        with self._lock:
+            return self._last_file
+
+    def set_last_intent(self, intent: str) -> None:
+        """Record the intent of the most recent non-trivial turn."""
+        with self._lock:
+            self._last_intent = intent
+
+    def get_last_intent(self) -> Optional[str]:
+        """Return the intent of the most recent non-trivial turn, or None."""
+        with self._lock:
+            return self._last_intent
+
+    def set_last_folder(self, folder: str) -> None:
+        """Record the last folder the user operated on (session-only, not persisted)."""
+        with self._lock:
+            self._last_folder = folder
+            log.debug("Memory: last_folder set to %r", folder)
+
+    def get_last_folder(self) -> Optional[str]:
+        """Return the folder from the most recent folder-scoped turn, or None."""
+        with self._lock:
+            return self._last_folder
+
     # ── History API ────────────────────────────────────────────────────────
 
     def add_turn(self, role: str, content: str) -> None:
@@ -138,13 +178,86 @@ class ConversationMemory:
             self._history.clear()
             self._persist()
 
+    # ── Pending-query (folder clarification) ──────────────────────────────
+
+    def set_pending_query(self, query: str) -> None:
+        """Save a query that is waiting for a folder-clarification reply."""
+        with self._lock:
+            self._pending_query = query
+            log.debug("Memory: pending_query set to %.60s", query)
+
+    def get_pending_query(self) -> Optional[str]:
+        """Return the saved pending query, or None."""
+        with self._lock:
+            return self._pending_query
+
+    def clear_pending_query(self) -> None:
+        """Remove the saved pending query."""
+        with self._lock:
+            self._pending_query = None
+
     def clear(self) -> None:
         """Clear both facts and history."""
         with self._lock:
             self._facts.clear()
             self._history.clear()
+            self._last_file = None
+            self._last_intent = None
+            self._last_folder = None
+            self._pending_query = None
             self._persist()
         log.info("Conversation memory cleared")
+
+    # ── Email search context ──────────────────────────────────────────────
+
+    def set_last_email_search_results(self, emails: list[dict]) -> None:
+        """Store the last email search results for context-aware reply generation.
+        
+        This allows "reply to first email", "reply to that email" type queries
+        to reference the previous search results without re-searching.
+        
+        Parameters
+        ----------
+        emails : list[dict]
+            List of email dicts from the last successful email search.
+        """
+        with self._lock:
+            self._last_email_search_results = emails.copy() if emails else []
+            log.debug("Memory: stored %d email search results", len(emails) if emails else 0)
+
+    def get_last_email_search_results(self) -> list[dict]:
+        """Return the stored email search results (empty list if none stored)."""
+        with self._lock:
+            return list(self._last_email_search_results) if self._last_email_search_results else []
+
+    def clear_email_search_results(self) -> None:
+        """Clear the stored email search results."""
+        with self._lock:
+            self._last_email_search_results = []
+
+    def set_last_email(self, email: dict) -> None:
+        """Store the last email for follow-up actions (like replying).
+        
+        This enables follow-ups like "reply to this" or "respond" without
+        re-specifying the email.
+        
+        Parameters
+        ----------
+        email : dict
+            Email dict with fields like 'from', 'subject', 'body', 'id', etc.
+        """
+        if not hasattr(self, '_last_email'):
+            self._last_email = None
+        with self._lock:
+            self._last_email = email.copy() if email else None
+            log.debug("Memory: last_email set (from: %s)", email.get("from", "?") if email else "None")
+
+    def get_last_email(self) -> Optional[dict]:
+        """Return the last email referenced (None if none stored)."""
+        if not hasattr(self, '_last_email'):
+            self._last_email = None
+        with self._lock:
+            return dict(self._last_email) if self._last_email else None
 
     # ── Auto-extraction ────────────────────────────────────────────────────
 

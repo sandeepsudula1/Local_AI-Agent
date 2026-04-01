@@ -215,19 +215,29 @@ class VectorStoreService:
         return document_service.load_all()
 
     def _post_ready(self) -> None:
-        """Actions to run once the store is ready (e.g. register tool)."""
+        """Actions to run once the project store is ready."""
+        # Notify the coordinator of the project store — documents.search is
+        # (re-)registered immediately so queries work right away.
         try:
-            from core.tool_registry import register_retrieval_tool
+            from core.tool_registry import update_retrieval_stores
             db = self.get_vector_db()
-            if db is not None:
-                register_retrieval_tool(
-                    db,
-                    threshold=settings.retrieval_threshold,
-                    model_name=settings.model_name,
-                )
-                log.info("Retrieval tool registered with tool_registry")
+            update_retrieval_stores(project_db=db)
+            log.info("Project vector store notified to coordinator")
         except Exception as exc:
-            log.warning("Could not register retrieval tool: %s", exc)
+            log.warning("Could not notify coordinator of project store: %s", exc)
+
+        # Start Windows Documents indexer in the background; it will
+        # re-register documents.search once its own store is ready.
+        try:
+            from services.document_indexer_service import document_indexer_service
+            log.info(
+                "Triggering Windows docs indexer (target: %s)",
+                settings.windows_docs_path,
+            )
+            document_indexer_service.start()
+            log.info("Windows docs indexer started in background")
+        except Exception as exc:
+            log.warning("Could not start Windows docs indexer: %s", exc)
 
 
 # ---------------------------------------------------------------------------

@@ -92,6 +92,57 @@ def retrieve_top_k(
         return []
 
 
+def retrieve_top_k_multi(
+    query: str,
+    vector_dbs: list,
+    k: int = 10,
+) -> list[_DocScore]:
+    """Search across multiple Chroma stores and return merged, score-sorted results.
+
+    Duplicate chunks (same content prefix) are deduplicated.  Results are
+    sorted by ascending score (lower = more similar for L2 distance) and
+    capped at *k* entries.
+
+    Parameters
+    ----------
+    query:
+        User question to embed and search.
+    vector_dbs:
+        List of Chroma instances to query.  ``None`` entries are skipped.
+    k:
+        Maximum results to return after merging and deduplication.
+    """
+    merged: list[_DocScore] = []
+    seen: set[str] = set()
+
+    for i, db in enumerate(vector_dbs):
+        if db is None:
+            continue
+        store_label = getattr(db, "_persist_directory", None) or f"store[{i}]"
+        try:
+            batch = db.similarity_search_with_score(query, k=k)
+            log.info(
+                "retrieve_top_k_multi: store %r → %d result(s)",
+                store_label, len(batch),
+            )
+            for doc, score in batch:
+                # Deduplicate by first 120 characters of content
+                key = doc.page_content[:120]
+                if key not in seen:
+                    seen.add(key)
+                    merged.append((doc, score))
+        except Exception as exc:
+            log.warning("Vector search failed on store %r: %s", store_label, exc)
+
+    merged.sort(key=lambda x: x[1])
+    log.info(
+        "retrieve_top_k_multi: %d store(s) queried → %d unique result(s) merged",
+        sum(1 for db in vector_dbs if db is not None),
+        len(merged),
+    )
+    return merged[:k]
+
+
 # ---------------------------------------------------------------------------
 # Step 2 — Rerank
 # ---------------------------------------------------------------------------
@@ -144,13 +195,21 @@ def _build_context(docs: list[_DocScore]) -> tuple[str, str]:
 
 
 _RAG_SYSTEM_PROMPT = (
-    "You are a precise document analysis assistant. "
-    "Answer using ONLY facts explicitly stated in the CONTEXT provided. "
+    "You are a Local Multi-Agent AI Assistant running on the user's computer. "
+    "You have access ONLY to documents indexed from C:\\AI_Test_Documents. "
+    "The folder C:\\Users\\Sandeep\\OneDrive\\Documents is NOT indexed and must never be used. "
+    "Answer using ONLY information present in the CONTEXT provided. "
+    "If the user mentions a specific filename (.pdf, .txt, .csv, .docx etc.), "
+    "answer ONLY from that exact file's content if it appears in the context. "
+    "Never answer from a different document unless that document was actually retrieved. "
+    "Do NOT repeatedly answer from the same document unless the retrieved context actually comes from that document. "
     "Be concise — 1 to 3 sentences maximum unless detail is requested. "
     "State numbers, names, and dates directly. "
-    "Do NOT add information not present in the CONTEXT. "
+    "Never hallucinate, guess, or fabricate document content. "
+    "If the user asks about files in any other folder, say: "
+    "'I do not have access to that file or folder.' "
     "If the context lacks the answer, say: "
-    "'The document does not contain that information.'"
+    "'The indexed documents do not contain information about this.'"
 )
 
 
@@ -159,7 +218,7 @@ def rag_answer(
     vector_db,
     model_name: Optional[str] = None,
     initial_k: int = 10,
-    top_k: int = 3,
+    top_k: int = 5,
     threshold: float = 1.5,
     prefer_cross_encoder: bool = False,
 ) -> tuple[Optional[str], Optional[str]]:

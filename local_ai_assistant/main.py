@@ -195,6 +195,29 @@ while True:
             print("Assistant: Memory unavailable.\n")
         continue
 
+    if _cmd in ("show permissions", "list permissions", "which folders are allowed", "show allowed folders"):
+        from core.access_control import ALLOWED_FOLDERS
+        from core.permission_store import permission_store as _ps
+        _dyn = _ps.get_granted_folders()
+        _lines = ["Assistant: Allowed folders:"]
+        _lines += [f"  [static]  {f}" for f in ALLOWED_FOLDERS]
+        if _dyn:
+            _lines += [f"  [granted] {f}" for f in sorted(_dyn)]
+        else:
+            _lines.append("  (no dynamically-granted folders yet)")
+        print("\n".join(_lines) + "\n")
+        continue
+
+    if _cmd.startswith("revoke access") or _cmd.startswith("remove permission"):
+        _rpath = user_input.split("access", 1)[-1].strip() if "access" in _cmd else user_input.split("permission", 1)[-1].strip()
+        if _rpath:
+            from core.permission_store import permission_store as _ps
+            _ps.revoke(_rpath)
+            print(f"Assistant: Access revoked for '{_rpath}'.\n")
+        else:
+            print("Assistant: Please specify the folder path to revoke.\n")
+        continue
+
     response = orchestrator.run(user_input)
     print(f"[Intent: {response.intent}]")
 
@@ -219,16 +242,31 @@ while True:
             print("Assistant: Reminder canceled.\n")
         continue
 
-    # ── REMINDER DELETE (prompt for which one) ───────────────────────────────
+    # ── REMINDER DELETE (smart fuzzy UX) ─────────────────────────────────────
     if response.answer == "__PROMPT_REMINDER_DELETE__":
-        print("Assistant: Which reminder should I delete?")
-        try:
-            to_delete = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            to_delete = ""
-        if to_delete:
-            from agents.tasks.reminder_agent import delete_reminder
-            print("Assistant:", delete_reminder(to_delete), "\n")
+        from agents.tasks.reminder_agent import handle_delete_reminder, delete_reminder, load_reminders
+        # First pass: try to match from the original user text
+        first_result = handle_delete_reminder(text)
+        print("Assistant:", first_result, "\n")
+        # If a multi-match list was returned, prompt once more for confirmation
+        if first_result.startswith("Multiple reminders match") or first_result.startswith("Which reminder"):
+            try:
+                choice = input("You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                choice = ""
+            if choice:
+                # If user typed a number, pick that reminder by index from the list
+                reminders = load_reminders()
+                if choice.isdigit():
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(reminders):
+                        r = reminders[idx]
+                        result = handle_delete_reminder(r.get("text", ""))
+                    else:
+                        result = "Invalid selection."
+                else:
+                    result = handle_delete_reminder(choice)
+                print("Assistant:", result, "\n")
         continue
 
     # ── Normal response ──────────────────────────────────────────────────────

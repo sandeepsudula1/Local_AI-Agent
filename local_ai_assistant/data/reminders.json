@@ -25,11 +25,6 @@
         "fired": true
     },
     {
-        "text": "every day exercise",
-        "time": "2026-09-06 00:00:00",
-        "fired": false
-    },
-    {
         "text": "reminder",
         "time": "2026-03-05 17:00:00",
         "fired": true
@@ -92,7 +87,7 @@
     {
         "text": "drink water 10 221",
         "time": "2026-03-11 00:00:00",
-        "fired": false
+        "fired": true
     },
     {
         "text": "drink water",
@@ -142,7 +137,7 @@
     {
         "text": "a reminder for at 9",
         "time": "2026-03-10 09:00:00",
-        "fired": false
+        "fired": true
     },
     {
         "text": "a reminder",
@@ -157,6 +152,71 @@
     {
         "text": "Update reminder",
         "time": "2026-03-12 18:00:00",
+        "fired": true
+    },
+    {
+        "text": "leave office",
+        "time": "2026-03-11 14:59:00",
+        "fired": true
+    },
+    {
+        "text": "write notes",
+        "time": "2026-03-13 16:55:00",
+        "fired": true
+    },
+    {
+        "text": "drink water",
+        "time": "2026-03-16 10:35:00",
+        "fired": true
+    },
+    {
+        "text": "Reminder",
+        "time": "2026-03-16 11:41:00",
+        "fired": true
+    },
+    {
+        "text": "join meeting",
+        "time": "2026-03-17 12:14:00",
+        "fired": true
+    },
+    {
+        "text": "\u201c reminder \u201d",
+        "time": "2026-03-17 16:40:00",
+        "fired": true
+    },
+    {
+        "text": "\u201cFind email about meeting and reminder\u201d",
+        "time": "2026-09-17 00:00:00",
         "fired": false
+    },
+    {
+        "text": "open laptop",
+        "time": "2026-03-24 11:12:00",
+        "fired": true
+    },
+    {
+        "text": "call John",
+        "time": "2026-03-26 10:55:00",
+        "fired": true
+    },
+    {
+        "text": "drink water",
+        "time": "2026-04-01 00:00:00",
+        "fired": false
+    },
+    {
+        "text": "call John",
+        "time": "2026-03-26 11:12:00",
+        "fired": true
+    },
+    {
+        "text": "drink water",
+        "time": "2026-03-27 15:30:00",
+        "fired": true
+    },
+    {
+        "text": "go to office",
+        "time": "2026-03-31 12:51:00",
+        "fired": true
     }
 ]

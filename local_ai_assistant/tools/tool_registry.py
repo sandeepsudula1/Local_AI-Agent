@@ -98,6 +98,26 @@ TOOLS: dict[str, dict] = {
         "intent": "EMAIL_SUMMARY",
         "args": [],
     },
+    "email.reply": {
+        "description": "Generate a draft reply to an email (does not send).",
+        "examples": [
+            "reply to this email",
+            "draft a response to alice's email",
+            "compose a reply for the latest email from john",
+        ],
+        "intent": "EMAIL_REPLY",
+        "args": ["query: str", "tone: str (optional, default: professional)"],
+    },
+    "email.send": {
+        "description": "Send an email after user confirmation (never auto-sends).",
+        "examples": [
+            "send the reply",
+            "yes, send it",
+            "send the email to alice",
+        ],
+        "intent": "EMAIL_SEND",
+        "args": ["email_data: dict"],
+    },
     "audio.transcribe": {
         "description": "Transcribe or index an audio file (.mp3, .wav, .m4a).",
         "examples": [

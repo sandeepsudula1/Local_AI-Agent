@@ -46,6 +46,9 @@ def summarize_emails_by_query(query, max_results=10):
     return "\n".join(lines)
 
 
+# Backwards-compatible alias expected by tool_executor
+
+
 def handle_email_summary():
     """Full summary of all emails, newest first."""
     emails = load_all_emails()
@@ -72,3 +75,7 @@ def handle_email_summary():
         output.append("--------------------")
 
     return "\n".join(output)
+
+
+# Backwards-compatible alias expected by tool_executor
+handle_email_summarizer = handle_email_summary  # type: ignore[assignment]

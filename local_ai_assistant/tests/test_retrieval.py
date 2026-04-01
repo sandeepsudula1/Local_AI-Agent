@@ -168,3 +168,75 @@ def test_load_nonexistent_file_returns_error(
     # Both should be None for a missing file
     assert content is None
     assert source is None
+
+
+# ---------------------------------------------------------------------------
+# Rule 1b — folder_path filter
+# ---------------------------------------------------------------------------
+
+def _make_doc_with_source(content: str, source: str):
+    doc = MagicMock()
+    doc.page_content = content
+    doc.metadata = {"source": source, "file_name": ""}
+    return doc
+
+
+def test_rule1b_folder_filter_blocks_wrong_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rule 1b must return 'not in folder' when indexed chunks are outside folder_path."""
+    import agents.knowledge.retrieval_agent as ra
+
+    allowed_folder = r"C:\AI_Test_Documents"
+    other_folder = r"C:\Other_Docs"
+    filename = "report.pdf"
+
+    # Chunk lives in *other_folder*, not in allowed_folder
+    fake_doc = _make_doc_with_source("report content", rf"{other_folder}\{filename}")
+
+    # Patch _search_by_filename_in_stores to return our fake chunk
+    monkeypatch.setattr(ra, "_search_by_filename_in_stores", lambda hint, dbs: [fake_doc])
+    monkeypatch.setattr(ra, "DOCS_PATH", str(tmp_path))
+
+    fake_db = MagicMock()
+    answer, source = ra.handle_retrieval(
+        f"summarize {filename}",
+        fake_db,
+        threshold=1.5,
+        model_name="llama3.2:1b",
+        folder_path=allowed_folder,
+    )
+
+    assert answer is not None
+    assert "not in" in answer.lower() or filename in answer
+    assert source is None
+
+
+def test_rule1b_folder_filter_allows_correct_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rule 1b must proceed when indexed chunk is inside folder_path."""
+    import agents.knowledge.retrieval_agent as ra
+
+    allowed_folder = r"C:\AI_Test_Documents"
+    filename = "report.pdf"
+    fake_doc = _make_doc_with_source("annual report content", rf"{allowed_folder}\{filename}")
+
+    monkeypatch.setattr(ra, "_search_by_filename_in_stores", lambda hint, dbs: [fake_doc])
+    monkeypatch.setattr(ra, "DOCS_PATH", str(tmp_path))
+
+    # Mock LLM to avoid real Ollama calls
+    fake_response = {"message": {"content": "Annual report answer."}}
+    monkeypatch.setattr(ra.ollama, "chat", lambda **kw: fake_response)
+
+    fake_db = MagicMock()
+    answer, source = ra.handle_retrieval(
+        f"summarize {filename}",
+        fake_db,
+        threshold=1.5,
+        model_name="llama3.2:1b",
+        folder_path=allowed_folder,
+    )
+
+    assert answer is not None
+    assert isinstance(answer, str)

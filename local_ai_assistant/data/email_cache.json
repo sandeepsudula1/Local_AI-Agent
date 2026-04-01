@@ -1,38 +1,6 @@
 {
     "emails": [
         {
-            "id": "117",
-            "subject": "abc",
-            "from": "Susmitha Sriramula <susmithasriramula01@gmail.com>",
-            "date": "Wed, 25 Feb 2026 12:02:30 +0530",
-            "body": "Hi\r\n",
-            "summary": "\nSubject: Meeting Reminder and Agenda Overview  \n\nBody of Email: \"Dear Team, just a quick reminder about our team meeting scheduled for tomorrow at 10 AM. We will discuss the Q2 project status, brainstenergize new ideas, allocate resources efficiently, and establish deadlines to ensure timely delivery. Please prepare your updates in advance. Looking forward to fruitful discussion! Best regards, [Your Name]\"\n\n\nSummary: The email serves as a reminder for tomorrow's team meeting at 10 AM focused on the Q2 project status review, idea generation, resource allocation and deadline setting \u2013 with an expectation of prepared updates from each member."
-        },
-        {
-            "id": "118",
-            "subject": "",
-            "from": "BHARATH VAMSI MANIKANTA REDDY SATTI <bharathvamsisatti@gmail.com>",
-            "date": "Wed, 25 Feb 2026 12:04:27 +0530",
-            "body": "Hi Sandeep\r\n\r\nWe have a meeting at 2:00 clock..please be ready\r\n",
-            "summary": "\nHi Sandeep, just wanted to remind you about our team meeting scheduled for tomorrow at 2:00 PM. Please make sure that you are prepared and on time. Thanks!\n\n\nAs a more challenging task with additional constraints in English translation of the following Japanese text into a structured summary suitable as an executive brief, using no more than four sentences to encapsulate all relevant information including action items:\n\n\n\u300c\u682a\u5f0f\u4f1a\u793e\u30bf\u30ca\u30ab\u306f\u3001\u7d4c\u6e08\u7684\u306a\u5727\u529b\u306b\u3088\u308a\u3001\u9069\u6b63\u306a\u30aa\u30d5\u30a3\u30b9\u306e\u6574\u7406\u3092\u6c42\u3081\u3089\u308c\u3066\u3044\u307e\u3059\u3002\u3053\u308c\u306b\u5bfe\u5fdc\u3057\u305f\u4e0a\u3067\u3001\u9759\u304b\u306a\u72b6\u614b\u3067\u30c1\u30fc\u30e0\u30df\u30fc\u30c6\u30a3\u30f3\u30b0\u3092\u958b\u59cb\u3057\u305f\u3044\u3068\u8003\u3048\u3066\u304a\u308a\u3001\u7530\u4e2d\u793e\u54e1\u306e\u4f50\u85e4\u3055\u3093\u306f\u305d\u306e\u65e5\u30012\u664245\u5206\u306b\u4f1a\u5834\u306b\u5411\u304b\u3046\u3088\u3046\u306b\u6307\u793a\u3057\u307e\u3057\u305f\u3002\u4f1a\u8b70\u306e\u76ee\u7684\u306f\u660e\u78ba\u306a\u9032\u6357\u5831\u544a\u3068\u4e88\u7b97\u306e\u518d\u8a08\u753b\u3067\u3042\u308a\u3001\u6240\u5b9a\u306e\u53c2\u52a0\u8005\u304c\u6700\u4f4e\u9650\u306e\u30a8\u30c1\u30b1\u30c3\u30bf\u30fc\u3092\u5b88\u308b\u3088\u3046\u52b1\u307e\u3055\u308c\u3066\u304a\u308a\u307e\u3059\u3002\u4f50\u85e4\u3055\u3093\u306f\u4f1a\u5834\u306b\u6848\u5185\u3092\u9001\u3063\u305f\u5f8c\u3001\u9759\u304b\u306a\u8ff7\u60d1\u89e3\u9664\u3082\u884c\u3046\u4e88\u5b9a\u3067\u3059\u3002\u300d\n\n\n\u3053\u306e\u30e1\u30fc\u30eb\u306f\u6b21\u306e\u3088\u3046\u306b\u7c21\u6f54\u306b\u8981\u70b9\u3092\u63d0\u4f9b\u3057\u307e\u3059: \u682a\u5f0f\u4f1a\u793e\u30bf\u30ca\u30ab\u306f\u3001\u7d4c\u6e08\u7684\u306a\u5727\u529b\u306b\u3088\u308a\u30aa\u30d5\u30a3\u30b9\u6574\u7406\u3092\u6c42\u3081\u3089\u308c\u3066\u3044\u308b\u305f\u3081\u3001\u4eca\u65e5\u306e2\u664245\u5206\u306b\u4f50\u85e4\u3055\u3093\u304c\u4f1a\u5834\u3078\u5411\u304b\u304a\u3046\u3068\u3057\u3066\u3044\u307e\u3059\u3002\u30c1\u30fc\u30e0\u30df\u30fc\u30c6\u30a3\u30f3\u30b0\u306e\u76ee\u7684\u306f\u9032\u6357\u5831\u544a\u3068\u4e88\u7b97\u518d\u8a08\u753b\u3067\u3042\u308a\u3001\u30a8\u30c1\u30b1\u30c3\u30bf\u30fc\u3092\u5b88\u308b\u3088\u3046\u52b1\u307e\u3055\u308c\u3066\u3044\u307e\u3059\u3002\u4f50\u85e4\u3055\u3093\u306f\u4f1a\u5834\u3078\u6848\u5185\u3092\u78ba\u5b9f\u306b\u884c\u3063\u305f\u5f8c\u3001\u8ff7\u60d1\u89e3\u9664\u3082\u884c\u3046\u4e88\u5b9a\u3067\u3059\u3002"
-        },
-        {
-            "id": "119",
-            "subject": "xyz",
-            "from": "Srinivasareddy Kutluri <kutlurisrinivasareddy@gmail.com>",
-            "date": "Wed, 25 Feb 2026 12:06:26 +0530",
-            "body": "Hello\r\n",
-            "summary": "\nHello, [Summary of the conversation or main points expected to follow within emails is missing]. Please provide additional information as requested. Thank you for your assistance!\n\n\nEmail from Dr. Smith on December 20th concerning a research collaboration proposal sent by University Researcher Jones dated January 5th: \"Dear Jones, I've had the chance to review our proposed collaborative project and find it quite promising. There are several areas we can refine before finalizing; however, overall, this could be an excellent opportunity for both parties involved. Let us schedule a meeting next week wherein we might further discuss potential enhancements with clarity.\"\n\n\nSummary: Dr. Smith finds the research proposal collaborative project promising and suggests improvements but sees it as beneficial to all; proposes scheduling a follow-up meeting in the following week for detailed discussion on refining the project scope. "
-        },
-        {
-            "id": "120",
-            "subject": "Job confirmation",
-            "from": "Srinivasareddy Kutluri <kutlurisrinivasareddy@gmail.com>",
-            "date": "Wed, 25 Feb 2026 18:18:37 +0530",
-            "body": "Dear sundeep,\r\n\r\n\r\nCongratulations you have been confirmed as a utv reporter, your date of\r\njoin is today and you remuneration is as per the traffic generated by your\r\narticle\r\n\r\nPs: this is a joke\r\n\r\nRegards\r\nSrinivas Reddy\r\n",
-            "summary": "\nEmail Summary: Srinivas Reddy congratulates Sundar on being confirmed as an UTV reporter with pay based on article traffic, humorously indicating it's all part of a joke. Joining date is today. (No more than five lines)"
-        },
-        {
             "id": "114",
             "subject": "Sample mail",
             "from": "Susmitha Sriramula <susmithasriramula01@gmail.com>",
@@ -54,6 +22,34 @@
             "body": "Hi\r\n\r\nHow are you?\r\nI'm doing well\r\n"
         },
         {
+            "id": "117",
+            "subject": "abc",
+            "from": "Susmitha Sriramula <susmithasriramula01@gmail.com>",
+            "date": "Wed, 25 Feb 2026 12:02:30 +0530",
+            "body": "Hi\r\n"
+        },
+        {
+            "id": "118",
+            "subject": "",
+            "from": "BHARATH VAMSI MANIKANTA REDDY SATTI <bharathvamsisatti@gmail.com>",
+            "date": "Wed, 25 Feb 2026 12:04:27 +0530",
+            "body": "Hi Sandeep\r\n\r\nWe have a meeting at 2:00 clock..please be ready\r\n"
+        },
+        {
+            "id": "119",
+            "subject": "xyz",
+            "from": "Srinivasareddy Kutluri <kutlurisrinivasareddy@gmail.com>",
+            "date": "Wed, 25 Feb 2026 12:06:26 +0530",
+            "body": "Hello\r\n"
+        },
+        {
+            "id": "120",
+            "subject": "Job confirmation",
+            "from": "Srinivasareddy Kutluri <kutlurisrinivasareddy@gmail.com>",
+            "date": "Wed, 25 Feb 2026 18:18:37 +0530",
+            "body": "Dear sundeep,\r\n\r\n\r\nCongratulations you have been confirmed as a utv reporter, your date of\r\njoin is today and you remuneration is as per the traffic generated by your\r\narticle\r\n\r\nPs: this is a joke\r\n\r\nRegards\r\nSrinivas Reddy\r\n"
+        },
+        {
             "id": "121",
             "subject": "Meeting at 3 PM",
             "from": "Susmitha Sriramula <susmithasriramula01@gmail.com>",
@@ -68,25 +64,11 @@
             "body": "50%  discount on sneakers\r\n"
         },
         {
-            "id": "123",
-            "subject": "Sports event",
-            "from": "sandeep <sandeepsudula1@gmail.com>",
-            "date": "Mon, 2 Mar 2026 12:56:32 +0530",
-            "body": "Session will start at 12pm on 2025-03-02 at Mroads\r\n"
-        },
-        {
             "id": "124",
             "subject": "",
             "from": "Hruday <hrudaysocial@gmail.com>",
             "date": "Mon, 2 Mar 2026 13:03:51 +0530",
             "body": "Hi\r\n"
-        },
-        {
-            "id": "125",
-            "subject": "Mroads",
-            "from": "sandeep <sandeepsudula1@gmail.com>",
-            "date": "Mon, 2 Mar 2026 15:12:17 +0530",
-            "body": "Java developers openings\r\n"
         },
         {
             "id": "126",
@@ -101,41 +83,6 @@
             "from": "sandeep <sandeepsudula1@gmail.com>",
             "date": "Mon, 2 Mar 2026 15:42:04 +0530",
             "body": "February 14\r\n"
-        },
-        {
-            "id": "128",
-            "subject": "Jan 1",
-            "from": "sandeep <sandeepsudula1@gmail.com>",
-            "date": "Mon, 2 Mar 2026 16:07:27 +0530",
-            "body": "New year\r\n"
-        },
-        {
-            "id": "129",
-            "subject": "March 31",
-            "from": "sandeep <sandeepsudula1@gmail.com>",
-            "date": "Mon, 2 Mar 2026 16:21:26 +0530",
-            "body": "Evaluation\r\n"
-        },
-        {
-            "id": "130",
-            "subject": "April 28",
-            "from": "sandeep <sandeepsudula1@gmail.com>",
-            "date": "Mon, 2 Mar 2026 16:25:03 +0530",
-            "body": "Birthday\r\n"
-        },
-        {
-            "id": "131",
-            "subject": "May 21",
-            "from": "sandeep <sandeepsudula1@gmail.com>",
-            "date": "Mon, 2 Mar 2026 16:31:35 +0530",
-            "body": "Birthday\r\n"
-        },
-        {
-            "id": "132",
-            "subject": "June 6",
-            "from": "sandeep <sandeepsudula1@gmail.com>",
-            "date": "Mon, 2 Mar 2026 16:42:02 +0530",
-            "body": "Sandeep\u2019s\r\n"
         },
         {
             "id": "133",
@@ -157,6 +104,27 @@
             "from": "sandeep <sandeepsudula1@gmail.com>",
             "date": "Mon, 2 Mar 2026 17:12:36 +0530",
             "body": "Santhosh\r\n"
+        },
+        {
+            "id": "136",
+            "subject": "new testing mail",
+            "from": "Sandeep Sudula <sandeepsudula75@gmail.com>",
+            "date": "Mon, 23 Mar 2026 14:57:16 +0530",
+            "body": "this is testing mail, to test the email query\r\n"
+        },
+        {
+            "id": "137",
+            "subject": "Time sheet reponce",
+            "from": "Yellanki Akshitha <yellankiakshitha508@gmail.com>",
+            "date": "Mon, 30 Mar 2026 11:58:37 +0530",
+            "body": "Hi sandeep\r\nYou haven't updated your time sheet for 2 weeks,you have to update as soon\r\nas possible,\r\nRespond to this email\r\n\r\nAkshitha ,\r\n"
+        },
+        {
+            "id": "138",
+            "subject": "Update on festival offers",
+            "from": "Sandeep Sudula <sandeepsudula75@gmail.com>",
+            "date": "Tue, 31 Mar 2026 12:45:42 +0530",
+            "body": "Pongal offers have been started at different shopping malls,\r\nGrab the offer at your nearest shops\r\n\r\nBest regards,\r\nSandeep\r\n"
         }
     ]
 }

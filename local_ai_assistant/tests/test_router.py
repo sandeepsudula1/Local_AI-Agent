@@ -15,6 +15,9 @@ class TestRouteKnownIntents:
     def test_document_search_alias(self):
         assert router.route("DOCUMENT_SEARCH") == "documents.search"
 
+    def test_document_folder_query_maps_to_document_search(self):
+        assert router.route("DOCUMENT_FOLDER_QUERY") == "documents.search"
+
     def test_summary_maps_to_document_summarize(self):
         assert router.route("SUMMARY") == "documents.summarize"
 

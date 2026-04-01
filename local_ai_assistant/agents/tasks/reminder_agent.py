@@ -357,6 +357,70 @@ def delete_reminder(text):
     return "Reminder deleted successfully."
 
 
+def handle_delete_reminder(user_input: str) -> str:
+    """Parse, fuzzy-match, and delete a reminder from natural-language input.
+
+    Single match  → delete immediately and confirm.
+    Multiple matches → return a numbered list asking the user to pick.
+    No match      → return a helpful 'not found' message.
+    """
+    reminders = load_reminders()
+    if not reminders:
+        return "You have no reminders to delete."
+
+    # Strip common delete/cancel prefixes to extract the search keyword
+    q = user_input.lower().strip()
+    for prefix in (
+        "delete reminder", "remove reminder", "cancel reminder",
+        "delete the reminder", "remove the reminder",
+        "delete", "remove", "cancel",
+    ):
+        if q.startswith(prefix):
+            q = q[len(prefix):].strip()
+            break
+
+    if not q:
+        # No keyword provided — list all reminders for the user to choose
+        lines = ["Which reminder should I delete?"]
+        for i, r in enumerate(reminders, 1):
+            lines.append(f"  {i}. [{r.get('time', '?')}] {r.get('text', '')}")
+        return "\n".join(lines)
+
+    # Build a set of meaningful words from the query (≥3 chars, skip stopwords)
+    _STOP = {"the", "a", "an", "my", "this", "that", "to", "for", "me", "i"}
+    q_words = {w for w in re.findall(r"\w+", q) if len(w) >= 3 and w not in _STOP}
+
+    matched = []
+    for r in reminders:
+        r_text = r.get("text", "").lower()
+        # Direct substring match
+        if q in r_text:
+            matched.append(r)
+            continue
+        # Word-level match: any meaningful query word found in reminder text
+        if q_words and any(w in r_text for w in q_words):
+            matched.append(r)
+
+    if not matched:
+        return f"No reminder matching '{q}' was found."
+
+    if len(matched) == 1:
+        r = matched[0]
+        new_list = [
+            x for x in reminders
+            if not (x.get("text") == r.get("text") and x.get("time") == r.get("time"))
+        ]
+        save_reminders(new_list)
+        return f"Deleted reminder: '{r.get('text', '')}' scheduled at {r.get('time', '?')}."
+
+    # Multiple matches — ask the user to confirm which one
+    lines = [f"Multiple reminders match '{q}'. Which one should I delete?"]
+    for i, r in enumerate(matched, 1):
+        lines.append(f"  {i}. [{r.get('time', '?')}] {r.get('text', '')}")
+    lines.append("Reply with the number or exact text to confirm deletion.")
+    return "\n".join(lines)
+
+
 def handle_set_reminder(user_text):
     """Helper for `smart_agent.py` to parse and schedule one or more reminders from free text.
     Supports multiple reminders separated by ';' or ' and then ' or comma when time expressions present.

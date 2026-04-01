@@ -32,6 +32,7 @@ _INTENT_TOOL_MAP: dict[str, str] = {
     # Document tools
     "RETRIEVAL":            "documents.search",
     "DOCUMENT_SEARCH":      "documents.search",
+    "DOCUMENT_FOLDER_QUERY": "documents.search",
     "SUMMARY":              "documents.summarize",
     "DOCUMENT_SUMMARY":     "documents.summarize",
     "DOCUMENT_LIST":        "documents.list",
@@ -46,6 +47,8 @@ _INTENT_TOOL_MAP: dict[str, str] = {
     "EMAIL":                "email.search",
     "EMAIL_SUMMARY":        "email.summarize",
     "EMAIL_SUMMARIZE":      "email.summarize",
+    "EMAIL_REPLY":          "email.reply",
+    "EMAIL_SEND":           "email.send",
 
     # Audio tools
     "AUDIO_TRANSCRIBE":     "audio.transcribe",

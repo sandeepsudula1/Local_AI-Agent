@@ -28,11 +28,13 @@ Usage::
 from __future__ import annotations
 
 import functools
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from core.logging_config import get_logger
+from configs.settings import settings
 
 log = get_logger(__name__)
 
@@ -252,19 +254,28 @@ def _register_defaults() -> None:
         log.warning("Could not register default tools: %s", exc)
 
 
-def register_retrieval_tool(vector_db: Any, threshold: float, model_name: str) -> None:
+def register_retrieval_tool(
+    vector_db: Any,
+    threshold: float,
+    model_name: str,
+    extra_dbs: list | None = None,
+) -> None:
     """Register the documents.search tool once the vector DB is ready.
 
-    Called by the vector store service after the DB has finished loading.
+    Called by the vector store service after the DB has finished loading,
+    and again by the Windows docs indexer once that store is also ready.
 
     Parameters
     ----------
     vector_db:
-        Loaded ChromaDB instance.
+        Primary (project) ChromaDB instance.
     threshold:
         Similarity score threshold for retrieval.
     model_name:
         Ollama model to use for answer synthesis.
+    extra_dbs:
+        Additional ChromaDB instances to search (e.g. the Windows docs store).
+        ``None`` entries in the list are ignored at query time.
     """
     from agents.knowledge.retrieval_agent import handle_retrieval
 
@@ -275,8 +286,62 @@ def register_retrieval_tool(vector_db: Any, threshold: float, model_name: str) -
             vector_db=vector_db,
             threshold=threshold,
             model_name=model_name,
+            extra_dbs=list(extra_dbs) if extra_dbs else [],
         ),
         description="RAG search over local documents",
         category="documents",
     )
-    log.info("Tool 'documents.search' registered with live vector DB")
+    store_count = 1 + len([d for d in (extra_dbs or []) if d is not None])
+    log.info("Tool 'documents.search' registered — searching %d store(s)", store_count)
+
+
+# ---------------------------------------------------------------------------
+# Multi-store coordinator
+# ---------------------------------------------------------------------------
+
+_UNSET: Any = object()          # sentinel — distinguishes "not supplied" from None
+_coord_lock = threading.Lock()
+_coord_state: dict[str, Any] = {"project_db": None, "win_db": _UNSET}
+
+
+def update_retrieval_stores(
+    *,
+    project_db: Any = _UNSET,
+    win_db: Any = _UNSET,
+) -> None:
+    """Thread-safe coordinator that (re-)registers ``documents.search``.
+
+    Either caller (project store or Windows docs store) may call this
+    function independently.  The first call that supplies ``project_db``
+    registers the tool immediately with only the project store.  When the
+    Windows docs store later calls with ``win_db``, the tool is
+    re-registered with *both* stores.
+
+    Parameters
+    ----------
+    project_db:
+        Primary ChromaDB instance (``data/vector_store_v2``).
+    win_db:
+        Windows Documents ChromaDB instance (``data/vector_store_win_docs``).
+        Pass ``None`` explicitly when the Windows store failed to load.
+    """
+    with _coord_lock:
+        if project_db is not _UNSET:
+            _coord_state["project_db"] = project_db
+        if win_db is not _UNSET:
+            _coord_state["win_db"] = win_db
+        p = _coord_state["project_db"]
+        w = _coord_state["win_db"]
+
+    # Cannot register until the project store is available
+    if p is None:
+        log.debug("update_retrieval_stores: project store not ready yet — skipping")
+        return
+
+    extra = [w] if (w is not _UNSET and w is not None) else []
+    register_retrieval_tool(
+        vector_db=p,
+        threshold=settings.retrieval_threshold,
+        model_name=settings.model_name,
+        extra_dbs=extra,
+    )
