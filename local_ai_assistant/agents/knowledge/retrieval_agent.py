@@ -356,8 +356,19 @@ def _load_document_from_path(file_path: str) -> Optional[str]:
             return None
     elif ext == ".txt":
         try:
-            return open(file_path, "r", encoding="utf-8", errors="ignore").read() or None
-        except Exception:
+            content = open(file_path, "r", encoding="utf-8", errors="ignore").read().strip()
+            if content:
+                log.debug("[LOAD] %r: %d chars (utf-8)", file_path, len(content))
+                return content
+            # Try latin-1 before giving up (handles some Windows-encoded files)
+            content = open(file_path, "r", encoding="latin-1", errors="ignore").read().strip()
+            if content:
+                log.debug("[LOAD] %r: %d chars (latin-1)", file_path, len(content))
+                return content
+            log.warning("[LOAD] %r: file is empty", file_path)
+            return None
+        except Exception as exc:
+            log.warning("[LOAD] Failed to read %r: %s", file_path, exc)
             return None
     elif ext in (".png", ".jpg", ".jpeg", ".webp"):
         return _ocr_image_file(file_path)

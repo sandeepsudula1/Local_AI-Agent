@@ -45,7 +45,8 @@ log = get_logger(__name__)
 _VALID_INTENTS: frozenset[str] = frozenset({
     "GREETING", "TIME", "DATE",
     "REMINDER_SET", "REMINDER_LIST", "REMINDER_DELETE",
-    "EMAIL_SUMMARY", "EMAIL_SEARCH", "EMAIL_REPLY", "EMAIL_SEND",
+    "EMAIL_SUMMARY", "EMAIL_SUMMARIZE", "EMAIL_QUERY",
+    "EMAIL_SEARCH", "EMAIL_REPLY", "EMAIL_SEND",
     "DOCUMENT_LIST", "SUMMARY", "TOPIC", "RETRIEVAL",
     "AUDIO_TRANSCRIBE", "AUDIO_QUERY", "AUDIO_LIST",
     "COMPARE", "CHAT", "GENERAL",
@@ -59,18 +60,20 @@ Format (required):
 Valid intent names (pick exactly one):
 GREETING, TIME, DATE, CHAT, GENERAL,
 RETRIEVAL, SUMMARY, TOPIC, DOCUMENT_LIST,
-EMAIL_SUMMARY, EMAIL_SEARCH, EMAIL_REPLY, EMAIL_SEND,
+EMAIL_SUMMARY, EMAIL_SUMMARIZE, EMAIL_QUERY, EMAIL_SEARCH, EMAIL_REPLY, EMAIL_SEND,
 REMINDER_SET, REMINDER_LIST, REMINDER_DELETE,
 AUDIO_TRANSCRIBE, AUDIO_QUERY, AUDIO_LIST,
 COMPARE
 
 Key classification rules:
-- EMAIL_REPLY  : reply / respond / draft a reply / give response / write back / compose reply
-- EMAIL_SEND   : send it / go ahead / yes send / OK send / send the reply / send the email
-- EMAIL_SEARCH : find emails / search inbox / show emails from [sender] / check my emails
-- REMINDER_SET : remind me at / set a reminder / alert me when
-- RETRIEVAL    : questions about documents, reports, or stored data
-- GENERAL      : open questions, comparisons, general knowledge
+- EMAIL_REPLY     : reply / respond / draft a reply / give response / write back / compose reply
+- EMAIL_SEND      : send it / go ahead / yes send / OK send / send the reply / send the email
+- EMAIL_SEARCH    : find emails / search inbox / show emails from [sender] / check my emails
+- EMAIL_SUMMARIZE : summarize this email / what is this email about / what does it say / give me the gist
+- EMAIL_QUERY     : factual questions about an email — who sent it / when / what is the subject
+- REMINDER_SET    : remind me at / set a reminder / alert me when / in X minutes
+- RETRIEVAL       : questions about documents, reports, or stored data
+- GENERAL         : open questions, comparisons, general knowledge
 
 Output ONLY the JSON object. No explanations, no extra text."""
 
@@ -124,14 +127,58 @@ class IntentClassifier:
           6. GENERAL            — final default
         """
         text = query.strip()
+        # Strip noise characters (bullet symbols, decorators) that confuse classification.
+        text = re.sub(r"[\u2022\u25cf\u25c6\u25b6\u25ba\u25b8\u25b7\u25e6\u2023\u2043]", "", text).strip()
         if not text:
             return "GENERAL"
 
-        # 0. Anaphoric document follow-up short-circuit (RETRIEVAL)
-        if last_file and last_intent in {"RETRIEVAL", "SUMMARY", "GENERAL"} \
-                and _FOLLOWUP_PATTERN.search(text):
-            log.info("[INTENT] context-followup -> RETRIEVAL (last_file=%r)", last_file)
-            return "RETRIEVAL"
+        # 0. Anaphoric document follow-up short-circuit (RETRIEVAL / SUMMARY)
+        if last_file:
+            # Explicit summarize request — checked FIRST so "summarize it" returns
+            # SUMMARY rather than RETRIEVAL (which _FOLLOWUP_PATTERN would produce).
+            # Pattern covers typos: summarize/summarise/summarizw/summerize.
+            if re.search(r"\bsumm(?:ar|er)i[szwe]\w*\b", text, re.IGNORECASE):
+                log.info("[INTENT] context-followup -> SUMMARY (last_file=%r)", last_file)
+                return "SUMMARY"
+            if last_intent in {"RETRIEVAL", "SUMMARY", "GENERAL"} \
+                    and _FOLLOWUP_PATTERN.search(text):
+                log.info("[INTENT] context-followup -> RETRIEVAL (last_file=%r)", last_file)
+                return "RETRIEVAL"
+
+        # 0.1. Email context — anaphoric informational follow-up
+        # "What is it about?" / "Summarize it" / "What is the subject?" should
+        # route to EMAIL_SUMMARIZE or EMAIL_QUERY.  Fires when EITHER:
+        #   a) last_intent was an email-related intent (fast, no memory access), or
+        #   b) memory.last_email is set (robust to stale/missing last_intent).
+        _email_ctx_active = last_intent in {
+            "EMAIL_SEARCH", "EMAIL_SUMMARIZE", "EMAIL_QUERY", "EMAIL_SUMMARY", "EMAIL_REPLY"
+        }
+        if not _email_ctx_active:
+            try:
+                from memory.conversation_memory import conversation_memory
+                _email_ctx_active = bool(conversation_memory.get_last_email())
+            except Exception:
+                pass
+        if _email_ctx_active:
+            email_info = self._email_info_followup(text)
+            if email_info:
+                log.info("[INTENT] email-info-followup -> %s | %r", email_info, text[:60])
+                return email_info
+
+        # 0.2. Draft-modification follow-up
+        # "Make it short" / "Rewrite it" / "Use bullet points" after EMAIL_REPLY
+        # should re-invoke EMAIL_REPLY with the modified phrasing, not fall to GENERAL.
+        if last_intent == "EMAIL_REPLY" and self._DRAFT_MODIFY_RE.search(text):
+            log.info("[INTENT] draft-modify-followup -> EMAIL_REPLY | %r", text[:60])
+            return "EMAIL_REPLY"
+
+        # 0.4. Pre-classification guard — escapes email context override for
+        # high-confidence non-email signals (e.g., reminder commands while
+        # last_intent is EMAIL_REPLY or EMAIL_SEARCH).
+        pre = self._pre_classify_guard(text)
+        if pre:
+            log.info("[INTENT] pre-classify-guard -> %s | %r", pre, text[:60])
+            return pre
 
         # 0.5. Email context override — memory-aware, fires before regex/LLM.
         # When an email is stored in memory and the input carries any reply signal
@@ -182,7 +229,157 @@ class IntentClassifier:
         log.info("[INTENT] default -> GENERAL | %r", text[:60])
         return "GENERAL"
 
+    # ── pre-classification guard ──────────────────────────────────────────
+    # These patterns identify signals so unambiguous that they must escape
+    # the email context override and email guardrail entirely.
+
+    # Inputs matching this pattern are NEVER overridden by email context.
+    # Reminder commands and time-relative expressions escape the email flow.
+    _OVERRIDE_EXEMPT_RE = re.compile(
+        r"\b(remind(?:er)?s?|set\s+(?:a\s+)?(?:reminder|alarm|alert)"
+        r"|alert\s+me|notify\s+me"
+        r"|in\s+\d+\s+(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)"
+        r"|summarize|summarise|explain|overview|gist)\b",
+        re.IGNORECASE,
+    )
+
+    # Patterns that disqualify a statement from being email reply body content.
+    # Catches WH-question starters (even without ?) and reminder/domain terms.
+    _REPLY_CONTENT_EXEMPT_RE = re.compile(
+        r"^(what|why|how|when|who|where|which|is|are|was|were|does|did"
+        r"|can|could|would|should|tell\s+me\b|explain)\b"
+        r"|\b(remind(?:er)?|set\s+(?:a\s+)?(?:reminder|alarm|alert)"
+        r"|alert\s+me|notify\s+me"
+        r"|in\s+\d+\s+(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|days?)"
+        r"|summarize|summarise|summary|overview|gist)\b",
+        re.IGNORECASE,
+    )
+
+    # Used by _pre_classify_guard: unambiguous reminder signals.
+    _REMINDER_FASTPATH_RE = re.compile(
+        r"\b(remind\s+me\b|set\s+(?:a\s+)?(?:reminder|alarm)|add\s+(?:a\s+)?reminder"
+        r"|create\s+(?:a\s+)?reminder|reminder\s+(?:for|at|in|to|about)"
+        r"|alert\s+me\b|notify\s+me\b"
+        r"|in\s+\d+\s+(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|days?))\b",
+        re.IGNORECASE,
+    )
+
+    # ── email context info follow-up (step 0.1) ────────────────────────────
+    # These patterns detect anaphoric informational questions about the email
+    # currently in context ("What is it about?", "Summarize it", "Who sent it?").
+    # Used in step 0.1 of classify() — fires ONLY when last_intent is email-related.
+
+    # Matches informational questions/requests with anaphoric reference.
+    # Requires either a summarize/explain verb + anaphoric ref, or a WH-word +
+    # anaphoric ref, or anaphoric ref + informational verb ("it ... about").
+    # Also matches implicit summary requests that don't need an anaphoric word
+    # (e.g. bare "summarize", "give me an overview").
+    _EMAIL_ANAPHORIC_INFO_RE = re.compile(
+        r"(?:\b(?:summarize|summarise|explain|describe|overview|gist|brief\s+me|tell\s+me)\b"
+        r".{0,40}\b(?:it|this|that|the\s+(?:email|mail)|above)\b)"
+        r"|(?:\b(?:what|who|when|where|why)\b"
+        r".{0,30}\b(?:it|this|that|the\s+(?:email|mail)|above\s+(?:email|mail)?)\b)"
+        r"|(?:\b(?:it|this|that)\b.{0,20}\b(?:about|contain|say|mean|says?|means?|talk)\b)"
+        # Implicit summary requests (no anaphoric word required when email is in memory)
+        r"|(?:^\s*(?:summarize|summarise|explain|brief\s+summary|give\s+(?:me\s+)?(?:a\s+)?(?:summary|overview|gist|recap))\s*[?!.,]?\s*$)",
+        re.IGNORECASE,
+    )
+
+    # Signals that the question is about email metadata (not content summary).
+    # Also matches direct (non-anaphoric) metadata questions such as
+    # "What is the subject?" and "Who sent this?".
+    _EMAIL_ANAPHORIC_META_RE = re.compile(
+        r"\bwho\s+sent\b|\bwho\s+(?:is|was)\s+(?:it|this|that)\s+from\b"
+        r"|\bsender\b|\bfrom\s+(?:whom|who)\b"
+        r"|\bwhen\b.{0,30}\b(?:it|this|that|email|mail)\b.{0,20}\b(?:sent|received|arrive)\b"
+        r"|\b(?:subject|topic|title)\b.{0,30}\b(?:this|the|it|that)\b"
+        # Direct non-anaphoric metadata questions
+        r"|\bwhat\s+(?:is|was)\s+the\s+(?:subject|topic|title)\b"
+        r"|\bwhat\s+(?:is|was)\s+(?:the\s+)?(?:sender|from\s+address)\b"
+        r"|\bwho\s+is\s+(?:the\s+)?(?:sender|author)\b"
+        r"|\bwho\s+(?:sent|wrote|emailed)\s+(?:this|it|the\s+(?:email|mail))?\b"
+        r"|\bwhen\s+(?:was|is)\s+(?:it\s+)?(?:sent|received|arrived?)\b",
+        re.IGNORECASE,
+    )
+
+    # Time/date/weather queries — excluded so "What time is it?" is never caught
+    # as an email info follow-up even when last_intent is EMAIL_SEARCH.
+    _EMAIL_ANAPHORIC_EXCL_RE = re.compile(
+        r"\bwhat\s+time\b|\btime\s+is\s+it\b|today(?:'?s)?\s+date\b"
+        r"|\bcurrent\s+(?:time|date)\b|\bweather\b|\btemperature\b",
+        re.IGNORECASE,
+    )
+
+    # Explicit document/file reference — prevents email context from absorbing
+    # queries that are clearly about a file, not an email.
+    _DOC_CTX_EXCL_RE = re.compile(
+        r"\b(files?|documents?|docs?|folder|directory)\b"
+        r"|\.(?:txt|pdf|docx?|pptx?|md|csv|xlsx?|json|log)\b",
+        re.IGNORECASE,
+    )
+    _EMAIL_NOUN_RE = re.compile(
+        r"\b(email|mail|inbox|message)\b",
+        re.IGNORECASE,
+    )
+
+    def _email_info_followup(self, text: str) -> Optional[str]:
+        """Detect anaphoric informational questions about the email in context.
+
+        Returns EMAIL_SUMMARIZE or EMAIL_QUERY when text is an informational
+        question that uses "it/this/that/the email" to refer to the email
+        currently in conversation context, OR when it is a direct metadata
+        question (e.g. "What is the subject?", "Who is the sender?").
+
+        Returns None when the text is not an informational question or contains
+        time/date/weather terms that should go through the normal pipeline.
+        """
+        if self._EMAIL_ANAPHORIC_EXCL_RE.search(text):
+            return None
+        # Don't capture queries that are clearly about a file/document, not an email.
+        # e.g. "summarize the above file" should not become EMAIL_SUMMARIZE.
+        if self._DOC_CTX_EXCL_RE.search(text) and not self._EMAIL_NOUN_RE.search(text):
+            return None
+        # Check META first — direct metadata questions like "What is the subject?"
+        # or "Who is the sender?" are unambiguous and don't need an anaphoric word.
+        if self._EMAIL_ANAPHORIC_META_RE.search(text):
+            return "EMAIL_QUERY"
+        # For summary/content requests, require either an anaphoric reference
+        # or a bare summarize verb (to avoid false positives).
+        if not self._EMAIL_ANAPHORIC_INFO_RE.search(text):
+            return None
+        return "EMAIL_SUMMARIZE"
+
+    def _pre_classify_guard(self, text: str) -> Optional[str]:
+        """Return a high-confidence non-email intent to escape email context override.
+
+        Runs between the anaphoric follow-up check (step 0) and the email context
+        override (step 0.5) in ``classify``.  Only fires for signals that are so
+        unambiguous they would otherwise be hijacked by the email override or
+        context guardrail — e.g., reminder commands when last_intent==EMAIL_REPLY.
+        """
+        if self._REMINDER_FASTPATH_RE.search(text):
+            return "REMINDER_SET"
+        return None
+
     # ── email context override (memory-aware) ─────────────────────────────
+    # Draft-modification follow-up — when last_intent == EMAIL_REPLY, these
+    # phrases indicate the user wants to modify/reformat an existing draft.
+    _DRAFT_MODIFY_RE = re.compile(
+        r"\b("
+        r"make\s+it\s+(short|shorter|brief|concise|formal|informal|friendly|professional)"
+        r"|make\s+(it\s+)?longer"
+        r"|shorten\s+it|shorten\s+the\s+(reply|email|draft|response|message)"
+        r"|keep\s+it\s+(short|brief|concise)"
+        r"|rewrite\s+(it|the\s+(reply|email|draft|response|message))?"
+        r"|simplify\s+(it|the\s+(reply|email|draft|response|message))?"
+        r"|make\s+(it\s+)?more\s+(formal|informal|friendly|professional|polite|concise)"
+        r"|change\s+(the\s+)?tone"
+        r"|use\s+(bullet|bullets|bullet\s+points|list\s+format)"
+        r"|in\s+bullet\s+points?|as\s+a\s+list"
+        r"|shorter\s+(version|reply|email|draft|response|message)"
+        r")\b",
+        re.IGNORECASE,
+    )
 
     # Broad reply-signal pattern — intentionally loose to catch typos and
     # paraphrases.  Used only when email context already exists in memory.
@@ -196,7 +393,6 @@ class IntentClassifier:
         r"|draft\s+.{0,15}(reply|response)"
         r"|compose\s+.{0,15}(reply|response)"
         r"|tell\s+(him|her|them)"
-        r"|above\s+(mail|email|message)"
         r"|reply\s+to|respond\s+to"
         r")\b",
         re.IGNORECASE,
@@ -209,45 +405,130 @@ class IntentClassifier:
     ) -> Optional[str]:
         """Return EMAIL_REPLY when email context exists in memory and text implies a response.
 
-        This is intentionally broad — it fires on typos, indirect phrasing, and
-        vague references ("give response", "repond to above", "tell her") whenever
-        a concrete email is already in session memory.  It runs BEFORE the regex
-        fast-path so it cannot be overridden by a wrong regex classification.
+        Catches two kinds of reply signals — both run BEFORE the regex fast-path
+        so they cannot be overridden by wrong regex classification:
+
+        Signal A — Reply command/phrase (broad RE): "reply to", "respond", "give response",
+                   typos, indirect phrasing.  Only requires email context in memory.
+        Signal B — Reply-content statement: "I will be available", "I am working on it".
+                   Requires BOTH email context AND last_intent in email flow so we don't
+                   accidentally intercept non-email first-person statements.
         """
-        if not self._BROAD_REPLY_RE.search(text):
+        # Guard: strong non-email signals must never be hijacked by email context.
+        # Reminder commands and time-relative expressions escape the override.
+        if self._OVERRIDE_EXEMPT_RE.search(text):
+            log.debug(
+                "[INTENT] email-context-override: exempt signal, skipping | %r",
+                text[:60],
+            )
             return None
+
+        _is_reply_cmd = bool(self._BROAD_REPLY_RE.search(text))
+        _is_reply_stmt = (
+            last_intent in {"EMAIL_SEARCH", "EMAIL_REPLY"}
+            and not _is_reply_cmd
+            # Pass email_context=True: we're already in email flow so short
+            # non-question statements ("Good morning", "I will be available") qualify.
+            and self._is_reply_content_statement(text, email_context=True)
+        )
+
+        if not _is_reply_cmd and not _is_reply_stmt:
+            return None  # no signal of any kind — let normal pipeline proceed
 
         try:
             from memory.conversation_memory import conversation_memory
 
             last_email = conversation_memory.get_last_email()
-            if last_email:
-                log.info(
-                    "[INTENT] email-context-override: last_email present "
-                    "(from=%s), broad reply signal matched -> EMAIL_REPLY",
-                    str(last_email.get("from", "?"))[:40],
-                )
-                return "EMAIL_REPLY"
-
-            # Also fire when search results are present (user searched, now replying)
-            search_results = conversation_memory.get_last_email_search_results()
-            if search_results:
-                log.info(
-                    "[INTENT] email-context-override: %d search results in memory, "
-                    "broad reply signal matched -> EMAIL_REPLY",
-                    len(search_results),
-                )
-                return "EMAIL_REPLY"
-
-            log.info(
-                "[INTENT] email-context-override: broad reply signal present BUT "
-                "no email in memory — letting normal pipeline decide. input=%r",
-                text[:60],
+            search_results = (
+                conversation_memory.get_last_email_search_results()
+                if not last_email else None
             )
+            _has_email_ctx = bool(last_email) or bool(search_results)
+
+            if not _has_email_ctx:
+                log.info(
+                    "[INTENT] email-context-override: signal present but no email "
+                    "in memory — letting normal pipeline decide. input=%r",
+                    text[:60],
+                )
+                return None
+
+            if _is_reply_cmd:
+                log.info(
+                    "[INTENT] email-context-override: reply-command + email_ctx "
+                    "(from=%s) -> EMAIL_REPLY",
+                    str(last_email.get("from", "?") if last_email else "search_results")[:40],
+                )
+            else:
+                log.info(
+                    "[INTENT] email-context-override: reply-content-statement "
+                    "+ email_ctx (last_intent=%s) -> EMAIL_REPLY | %r",
+                    last_intent, text[:60],
+                )
+            return "EMAIL_REPLY"
+
         except Exception as exc:
             log.debug("[INTENT] email-context-override memory check failed: %s", exc)
 
         return None
+
+    # ── reply-content detection ────────────────────────────────────────────
+
+    _REPLY_CMD_RE = re.compile(
+        r"\b(reply|respond|response|draft|compose|answer|write\s*back"
+        r"|send\s+it|go\s+ahead|proceed)\b",
+        re.IGNORECASE,
+    )
+    _QUESTION_RE = re.compile(r"\?")
+    # Search/browse commands at the start of text are never reply content.
+    _EMAIL_SEARCH_CMD_RE = re.compile(
+        r"^(?:find|search|look\s+for|show|list|fetch|get|check|read)\b",
+        re.IGNORECASE,
+    )
+    # Broad set of statement-opening words that indicate reply body content.
+    # Covers: first-person, acknowledgements, greetings, affirmatives.
+    _CONTENT_STMT_RE = re.compile(
+        r"^i\s+(will|am|have|can|'?ll|would|need|was|want|did|think|believe"
+        r"|understand|confirm|agree|appreciate|apologize|apologise)\b"
+        r"|^(sure|okay|ok|yes|no|sorry|thanks|thank|good|hi|hello|dear"
+        r"|we\b|great|noted|understood|absolutely|certainly|definitely"
+        r"|unfortunately|happy\s+to|please\b|kindly\b)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_reply_content_statement(cls, text: str, *, email_context: bool = False) -> bool:
+        """Return True when *text* looks like user-provided reply body content.
+
+        Parameters
+        ----------
+        text : str
+            Input to evaluate (may be already lowercased).
+        email_context : bool
+            When True (caller has confirmed email context exists + last_intent is
+            in email flow), any short non-question statement (≤8 words) is treated
+            as reply content.  This covers short greetings and fragments that would
+            otherwise not match the explicit regex.
+        """
+        t = text.strip().lower()
+        if not t:
+            return False
+        if cls._REPLY_CMD_RE.search(t):
+            return False
+        if cls._QUESTION_RE.search(t):
+            return False
+        # Search/browse commands are never reply body content
+        if cls._EMAIL_SEARCH_CMD_RE.search(t):
+            return False
+        # Guard: WH-question starters and non-email domain terms are never reply
+        # body content. Prevents "Set reminder in 1 minute" and "What is this email
+        # about" from being classified as EMAIL_REPLY when email context is active.
+        if cls._REPLY_CONTENT_EXEMPT_RE.search(t):
+            return False
+        # In email context: any short unambiguous statement qualifies as reply content
+        if email_context and len(t.split()) <= 8:
+            return True
+        return bool(cls._CONTENT_STMT_RE.search(t))
 
     # ── context guardrail ───────────────────────────────────────────────────
 
@@ -265,6 +546,16 @@ class IntentClassifier:
         Also reads history to detect shown drafts and search results.
         """
         t = text.lower().strip()
+
+        # Guard: reminder/time-relative signals must escape the email guardrail.
+        # Without this, "Set reminder in 1 minute" after EMAIL_SEARCH/EMAIL_REPLY
+        # would be misrouted via the content-statement path.
+        if self._OVERRIDE_EXEMPT_RE.search(t):
+            log.debug(
+                "[INTENT] guardrail: exempt signal, skipping email guardrail | %r",
+                t[:60],
+            )
+            return None
 
         _REPLY_SIG = re.compile(
             r"\b(reply|respond|response|draft|compose|answer|write\s*back"
@@ -290,6 +581,18 @@ class IntentClassifier:
             if _REPLY_SIG.search(t) and not _SEND_SIG.search(t):
                 log.info(
                     "[INTENT] guardrail: last_intent=%s + reply signal -> EMAIL_REPLY",
+                    last_intent,
+                )
+                return "EMAIL_REPLY"
+
+        # After EMAIL_SEARCH or EMAIL_REPLY: user provides reply *content* (a statement).
+        # e.g. "I will be available", "Good morning", "I am working on it"
+        # These are NOT reply commands but ARE the body the user wants in the reply.
+        # email_context=True allows short non-question statements to match.
+        if last_intent in {"EMAIL_SEARCH", "EMAIL_REPLY"}:
+            if self._is_reply_content_statement(t, email_context=True):
+                log.info(
+                    "[INTENT] guardrail: last_intent=%s + content statement -> EMAIL_REPLY",
                     last_intent,
                 )
                 return "EMAIL_REPLY"
@@ -492,11 +795,12 @@ class IntentClassifier:
         """
         t = text.lower().strip()
 
-        # Email reply signal — only when no document-domain keywords are present
+        # Email reply signal — only when no document-domain or reminder keywords present
         if re.search(r"\b(reply|respond|response)\b", t):
             if not re.search(
                 r"\b(files?|documents?|docs?|folder|directory"
-                r"|summarize|summarise|list|show\s+files?)\b",
+                r"|summarize|summarise|list|show\s+files?"
+                r"|remind(?:er)?|alarm|alert)\b",
                 t,
             ):
                 return "EMAIL_REPLY"
@@ -656,6 +960,20 @@ class IntentClassifier:
             r"(files?|documents?|docs?|pdfs?|reports?|folder|directory"
             r"|available|indexed|uploaded|stored)"
         )
+
+        # ----------------------------------------------------------------
+        # Explicit filename with extension → SUMMARY or RETRIEVAL.
+        # Fires BEFORE the DOCUMENT_LIST block so inputs like "find AiAgent.txt"
+        # and "summarizw spring.txt" never fall through to the LLM.
+        # ----------------------------------------------------------------
+        _DOC_EXT_RE = (
+            r"\b[\w][\w\s\-]*\.(?:pdf|docx?|pptx?|txt|md|csv|xlsx?|png|jpg|jpeg|json|log)\b"
+        )
+        if not _HAS_EMAIL_KW and _re.search(_DOC_EXT_RE, t, _re.IGNORECASE):
+            if _re.search(r"\bsumm(?:ar|er)i[szwe]\w*\b", t, _re.IGNORECASE):
+                return "SUMMARY"
+            return "RETRIEVAL"
+
         if not _HAS_EMAIL_KW and (
             _re.search(
                 r"\b" + _DOC_VERB + r"\b.{0,50}\b" + _DOC_NOUN + r"\b",
@@ -678,7 +996,52 @@ class IntentClassifier:
             if not _re.search(
                 r"\b[\w][\w\-\.]*\.(?:pdf|docx|pptx|txt|md|csv|xlsx|png|jpg|jpeg|json)\b", t
             ):
+                # Summarize verb → return SUMMARY, not a listing intent
+                if _re.search(r"\bsumm(?:ar|er)i[szwe]\w*\b", t, _re.IGNORECASE):
+                    return "SUMMARY"
                 return "DOCUMENT_LIST"
+
+        # EMAIL_SUMMARIZE — informational questions / summary requests about the
+        # email in context.  Must come BEFORE _is_email_search so that
+        # "what is this email about" is not captured as EMAIL_SEARCH.
+        _ECW = r"(?:this|the|that|above|it)"   # email context words
+        _ENW = r"(?:mail(?:s|box)?|email(?:s|box)?|inbox|messages?)"  # email nouns
+        _summarize_hit = (
+            _re.search(
+                r"\b(summarize|summarise|brief\s+summary|overview|gist|explain|describe)\b"
+                r".{0,40}\b" + _ECW + r"\b.{0,20}\b" + _ENW + r"\b",
+                t, _re.IGNORECASE,
+            )
+            or _re.search(
+                r"\bwhat\b.{0,20}\b" + _ECW + r"\b.{0,20}\b" + _ENW
+                + r"\b.{0,30}\b(about|contain|say|mean|talk|discuss)\b",
+                t, _re.IGNORECASE,
+            )
+            or _re.search(
+                r"\b" + _ECW + r"\b.{0,20}\b" + _ENW
+                + r"\b.{0,30}\b(about|contain|says?|means?|talks?|discusses?)\b",
+                t, _re.IGNORECASE,
+            )
+        )
+        if _summarize_hit:
+            return "EMAIL_SUMMARIZE"
+
+        # EMAIL_QUERY — specific factual/metadata questions about the email in context.
+        _email_query_hit = (
+            _re.search(
+                r"\b(who|when|where|which|why|how\s+(?:many|much|long|often))\b"
+                r".{0,40}\b(?:this|the|that|above)\b.{0,20}\b" + _ENW + r"\b",
+                t, _re.IGNORECASE,
+            )
+            or _re.search(
+                r"\bwhat\s+(is|are|was|were)\s+(the\s+)?"
+                r"(subject|sender|from|date|time|recipient|to\b|cc|attachment"
+                r"|reply[\s\-]to|priority|importance)\b",
+                t, _re.IGNORECASE,
+            )
+        )
+        if _email_query_hit:
+            return "EMAIL_QUERY"
 
         # EMAIL SEARCH / SUMMARY — checked AFTER reply/send to avoid misclassification
         _EMAIL_W2 = r"(?:mail(?:s|box)?|email(?:s|box)?|inbox|messages?)"

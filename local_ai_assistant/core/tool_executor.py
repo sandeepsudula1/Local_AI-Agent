@@ -24,6 +24,7 @@ Tool map (tool_name → handler)
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -57,6 +58,14 @@ class ToolResult:
 # ---------------------------------------------------------------------------
 
 _TOOL_DOC_SEARCH = "documents.search"
+
+# Matches "reply to X that [CONTENT]" / "reply with [CONTENT]" / "respond saying [CONTENT]"
+# Captures the user-provided reply body so mode detection works even when the
+# input starts with a reply-command word.
+_REPLY_INLINE_CONTENT_RE = re.compile(
+    r"\b(?:reply|respond)\b.*?\b(?:that|with|saying|:)\s+(.{4,})",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Individual handlers
@@ -157,6 +166,7 @@ def _handle_email_search(user_input: str, **ctx) -> tuple[str, str]:
 
     # Store search results in conversation memory for context-aware replies
     # This allows "reply to first email", "reply to that email", etc.
+    # Every new search overwrites previous context to prevent cross-context contamination.
     try:
         all_emails = load_all_emails()
         if all_emails:
@@ -165,33 +175,28 @@ def _handle_email_search(user_input: str, **ctx) -> tuple[str, str]:
                 results = improved_search_emails(user_input, max_results=20, use_semantic=True)
                 if results:
                     conversation_memory.set_last_email_search_results(results)
-                    log.info("[DEBUG] EMAIL_SEARCH: Stored %d search results in memory", len(results))
-                    # Store first email for follow-up context (for EMAIL_REPLY follow-ups)
-                    if results:
-                        first_email = results[0]
-                        conversation_memory.set_last_email(first_email)
-                        ctx["_last_email"] = first_email
-                        log.info("[DEBUG] EMAIL_SEARCH: Stored last_email in memory (from: %s, subject: %s)", 
-                                first_email.get("from", "?"), first_email.get("subject", "?"))
-                        # Verify it was stored
-                        verify = conversation_memory.get_last_email()
-                        if verify:
-                            log.info("[DEBUG] EMAIL_SEARCH: Verified last_email in memory: from=%s", verify.get("from", "?"))
-                        else:
-                            log.warning("[DEBUG] EMAIL_SEARCH: Failed to verify last_email in memory!")
+                    log.info("[EMAIL_SEARCH] Stored %d search results in memory", len(results))
+                    first_email = results[0]
+                    conversation_memory.set_last_email(first_email)
+                    ctx["_last_email"] = first_email
+                    log.info("[EMAIL_SEARCH] last_email set → from: %s | subject: %s",
+                             first_email.get("from", "?"), first_email.get("subject", "?"))
+                    verify = conversation_memory.get_last_email()
+                    if not verify:
+                        log.warning("[EMAIL_SEARCH] Failed to verify last_email in memory!")
             except Exception as e:
                 # Fallback: store all emails for context
-                log.info("[DEBUG] EMAIL_SEARCH: Search failed (%s), using fallback", str(e)[:50])
+                log.info("[EMAIL_SEARCH] Search failed (%s), using fallback", str(e)[:50])
                 recent = all_emails[-20:]
                 conversation_memory.set_last_email_search_results(recent)
-                log.info("[DEBUG] EMAIL_SEARCH: Stored %d recent emails in memory (fallback)", len(recent))
+                log.info("[EMAIL_SEARCH] Stored %d recent emails in memory (fallback)", len(recent))
                 if recent:
                     first_email = recent[0]
                     conversation_memory.set_last_email(first_email)
                     ctx["_last_email"] = first_email
-                    log.info("[DEBUG] EMAIL_SEARCH: Stored last_email from fallback: from=%s", first_email.get("from", "?"))
+                    log.info("[EMAIL_SEARCH] last_email set (fallback) → from: %s", first_email.get("from", "?"))
     except Exception as e:
-        log.warning("[DEBUG] EMAIL_SEARCH: Could not store email search results: %s", e)
+        log.warning("[EMAIL_SEARCH] Could not store email search results: %s", e)
 
     return answer, ""
 
@@ -202,6 +207,49 @@ def _handle_email_summarize(user_input: str, **ctx) -> tuple[str, str]:
     return answer, ""
 
 
+def _handle_email_query(user_input: str, **ctx) -> tuple[str, str]:
+    """Answer a factual question about the email currently in memory.
+
+    Reads from ``last_email`` in conversation memory and returns a direct
+    answer without triggering a new email search.  Falls through to
+    ``_handle_email_search`` only when no email context exists in memory.
+    """
+    from memory.conversation_memory import conversation_memory
+
+    last_email: Optional[dict] = None
+    try:
+        last_email = conversation_memory.get_last_email()
+    except Exception as exc:
+        log.debug("[EMAIL_QUERY] Memory read failed: %s", exc)
+
+    if last_email:
+        t = user_input.lower()
+        if re.search(r"\b(who|from\b|sender)\b", t):
+            answer = f"This email was sent by: {last_email.get('from', 'Unknown')}"
+        elif re.search(r"\b(when|date|received|arrived?)\b", t):
+            answer = f"This email was received on: {last_email.get('date', 'Unknown')}"
+        elif re.search(r"\b(subject|topic|title|about)\b", t):
+            answer = f"Subject: {last_email.get('subject', '(no subject)')}"
+        elif re.search(r"\b(to\b|recipient|receiver)\b", t):
+            answer = f"This email was addressed to: {last_email.get('to', 'Unknown')}"
+        else:
+            body = (last_email.get("body") or "").strip()
+            answer = (
+                f"Email from {last_email.get('from', '?')}\n"
+                f"Subject  : {last_email.get('subject', '(no subject)')}\n"
+                f"Date     : {last_email.get('date', 'Unknown')}"
+            )
+            if body:
+                preview = body[:400] + ("..." if len(body) > 400 else "")
+                answer += f"\n\nContent:\n{preview}"
+        log.info("[EMAIL_QUERY] Answered from memory (from=%s)", str(last_email.get("from", "?"))[:40])
+        return answer, ""
+
+    # No email in memory — fall back to search
+    log.info("[EMAIL_QUERY] No email in memory, falling back to search")
+    return _handle_email_search(user_input, **ctx)
+
+
 def _handle_email_reply(user_input: str, **ctx) -> tuple[str, str]:
     """Generate a draft email reply (does not send ever).
     
@@ -209,16 +257,38 @@ def _handle_email_reply(user_input: str, **ctx) -> tuple[str, str]:
     Never sends automatically - always creates draft first.
     """
     from agents.knowledge.email_reply_agent_v2 import (
+        detect_reply_style,
         find_target_email,
         generate_email_reply,
         get_tone_options,
     )
+    from core.intent_classifier import IntentClassifier
     from memory.conversation_memory import conversation_memory
 
-    log.info("[DEBUG] EMAIL_REPLY: Handling reply for: %s", user_input[:60])
+    log.info("[EMAIL_REPLY] Handler reached successfully")
+    log.info("[EMAIL_REPLY] Handling reply for: %s", user_input[:60])
 
-    # Parse tone from query
+    # ── Detect mode: content-transform vs auto-generate ───────────────────
+    # If the user provided reply body content (a plain statement like "I will
+    # be available") rather than a reply command, capture it for the prompt.
+    # Use email_context=True: we are already inside the EMAIL_REPLY handler so
+    # any short non-question statement is reply body, not a new command.
+    user_content: str | None = None
+    # First try to extract inline content from "reply to X that [CONTENT]" patterns.
+    # This handles cases where the reply command and content are in the same message.
+    _inline_m = _REPLY_INLINE_CONTENT_RE.search(user_input)
+    if _inline_m:
+        user_content = _inline_m.group(1).strip()
+        log.info("[EMAIL_REPLY] Extracted inline reply content: %r", user_content[:60])
+    elif IntentClassifier._is_reply_content_statement(user_input.strip().lower(), email_context=True):
+        user_content = user_input.strip()
+        log.info("[EMAIL_REPLY] Mode: user-provided content transformation → %r", user_content[:60])
+    else:
+        log.info("[EMAIL_REPLY] Mode: auto-generate reply from email context")
+
+    # Parse tone and style from query
     tone = "professional"  # default
+    style = detect_reply_style(user_input)
     tone_options = get_tone_options()
 
     user_lower = user_input.lower()
@@ -229,33 +299,56 @@ def _handle_email_reply(user_input: str, **ctx) -> tuple[str, str]:
 
     # Get last email search results from conversation memory
     search_results = conversation_memory.get_last_email_search_results()
-    log.info("[DEBUG] EMAIL_REPLY: Retrieved %d search results from memory", len(search_results) if search_results else 0)
+    log.info("[EMAIL_REPLY] Retrieved %d search results from memory", len(search_results) if search_results else 0)
 
-    # Find the target email using intelligent selection logic
+    # ── Email selection: strict priority order ────────────────────────────
+    # Priority 1: Explicit reference (ID / sender address / sender name / index)
+    #   find_target_email returns None when no explicit match is found —
+    #   it no longer falls back to the globally latest email.
     target_email = find_target_email(user_input, search_results=search_results)
-    log.info("[DEBUG] EMAIL_REPLY: Explicit target found: %s", target_email.get("from") if target_email else None)
+    selection_source = None
 
-    # If no explicit target found, try last email from memory or search results
+    if target_email:
+        selection_source = "explicit_match"
+        log.info("[EMAIL_REPLY] Priority 1 — explicit match: from=%s subject=%s",
+                 target_email.get("from", "?"), target_email.get("subject", "?"))
+
+    # Priority 2: First result from the most recent EMAIL_SEARCH
+    #   This must take precedence over stale memory so that the reply is always
+    #   bound to the user's current search context.
+    if not target_email and search_results:
+        target_email = search_results[0]
+        selection_source = "search_results"
+        log.info("[EMAIL_REPLY] Priority 2 — first search result: from=%s subject=%s",
+                 target_email.get("from", "?"), target_email.get("subject", "?"))
+
+    # Priority 3: Last email stored in conversation memory
+    #   Only used when no search results exist (avoids cross-context contamination).
     if not target_email:
-        # Priority 1: Try last email from memory (previous EMAIL_SEARCH or EMAIL_REPLY)
         try:
             last_email = conversation_memory.get_last_email()
             if last_email:
-                log.info("[DEBUG] EMAIL_REPLY: Using last email from memory (from: %s)", last_email.get("from", "?"))
                 target_email = last_email
+                selection_source = "memory_last_email"
+                log.info("[EMAIL_REPLY] Priority 3 — memory last_email: from=%s subject=%s",
+                         target_email.get("from", "?"), target_email.get("subject", "?"))
             else:
-                log.info("[DEBUG] EMAIL_REPLY: No last_email in memory")
+                log.info("[EMAIL_REPLY] No last_email in memory")
         except Exception as e:
-            log.warning("[DEBUG] EMAIL_REPLY: Error retrieving last_email from memory: %s", e)
-    
-    # Priority 2: Use first email from search results (if any)
-    if not target_email and search_results:
-        log.info("[DEBUG] EMAIL_REPLY: Using first email from search results (from: %s)", search_results[0].get("from", "?"))
-        target_email = search_results[0]
+            log.warning("[EMAIL_REPLY] Error retrieving last_email from memory: %s", e)
+
+    # Final validation log
+    if target_email:
+        log.info(
+            "[EMAIL_REPLY] Selected email → subject: %s | from: %s | source: %s",
+            target_email.get("subject", "?"),
+            target_email.get("from", "?"),
+            selection_source,
+        )
 
     if not target_email:
         # Provide helpful error message
-        log.warning("[DEBUG] EMAIL_REPLY: No email found to reply to! search_results=%d, memory_last_email=%s", 
+        log.warning("[EMAIL_REPLY] No email found to reply to — search_results=%d, memory_last_email=%s",
                    len(search_results) if search_results else 0,
                    "exists" if conversation_memory.get_last_email() else "none")
         return (
@@ -269,7 +362,7 @@ def _handle_email_reply(user_input: str, **ctx) -> tuple[str, str]:
         )
 
     # Generate reply with the target email
-    reply_text = generate_email_reply(target_email, tone=tone)
+    reply_text = generate_email_reply(target_email, tone=tone, user_content=user_content, style=style)
 
     if not reply_text:
         return (
@@ -283,7 +376,7 @@ def _handle_email_reply(user_input: str, **ctx) -> tuple[str, str]:
     subject = target_email.get("subject", "(No Subject)")
     email_id = target_email.get("id", "?")
 
-    log.info("[DEBUG] EMAIL_REPLY: Creating draft reply (to: %s, subject: %s)", from_addr, subject)
+    log.info("[EMAIL_REPLY] Creating draft reply → to: %s | subject: %s", from_addr, subject)
 
     from services.gmail_service import gmail_service
     from services.gmail_service import _CREDENTIALS_FILE as _GMAIL_CREDS_PATH
@@ -564,6 +657,7 @@ _HANDLERS: dict[str, Any] = {
     "documents.topics":     _handle_document_topics,
     "email.search":         _handle_email_search,
     "email.summarize":      _handle_email_summarize,
+    "email.query":          _handle_email_query,
     "email.reply":          _handle_email_reply,
     "email.send":           _handle_email_send,
     "audio.transcribe":     _handle_audio_transcribe,

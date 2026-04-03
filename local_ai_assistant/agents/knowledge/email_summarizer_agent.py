@@ -49,8 +49,46 @@ def summarize_emails_by_query(query, max_results=10):
 # Backwards-compatible alias expected by tool_executor
 
 
-def handle_email_summary():
-    """Full summary of all emails, newest first."""
+def handle_email_summary(user_input: str = ""):
+    """Summarize emails, optionally scoped to a specific context email.
+
+    When called with a non-empty user_input (e.g. from tool_executor), the
+    function first checks conversation memory for a ``last_email``.  If one
+    exists it summarises that specific email.  Otherwise it searches by
+    user_input query, falling back to a full inbox summary.
+
+    Called with no arguments (legacy call sites) it works exactly as before:
+    returns a full inbox summary, newest first.
+    """
+    if user_input and user_input.strip():
+        # Try memory-first: summarise the email currently in context.
+        try:
+            from memory.conversation_memory import conversation_memory
+            last_email = conversation_memory.get_last_email()
+            if last_email:
+                s = summarize_single_email(last_email)
+                body = (last_email.get("body") or "").strip()
+                lines = [
+                    "Email Summary",
+                    "=" * 40,
+                    f"From     : {last_email.get('from', 'Unknown')}",
+                    f"Subject  : {last_email.get('subject', '(no subject)')}",
+                ]
+                if last_email.get("date"):
+                    lines.append(f"Date     : {last_email.get('date')}")
+                lines.append("")
+                lines.append(f"Summary  : {s['summary']}")
+                if body:
+                    lines.append("")
+                    lines.append("Full Content:")
+                    lines.append(body[:1000] + ("..." if len(body) > 1000 else ""))
+                return "\n".join(lines)
+        except Exception:
+            pass
+        # No email in memory — search by query
+        return summarize_emails_by_query(user_input.strip())
+
+    # No user_input — full inbox summary (original behaviour)
     emails = load_all_emails()
     if not emails:
         return "No emails available."

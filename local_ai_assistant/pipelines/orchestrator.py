@@ -348,12 +348,30 @@ class Orchestrator:
                         r"|reply\s+to|respond\s+to)\b",
                         re.IGNORECASE,
                     )
+                    _forced_email_reply = False
                     if _ORCH_REPLY_RE.search(text):
+                        _forced_email_reply = True
                         log.info(
                             "[ORCHESTRATOR] Email-context safety net: intent %s -> EMAIL_REPLY "
-                            "(email_ctx=True, input=%r)",
+                            "(email_ctx=True, reply-command matched, input=%r)",
                             intent, text[:50],
                         )
+                    else:
+                        # Also force EMAIL_REPLY when the user typed a reply-content
+                        # *statement* (e.g. "I will be available") and email context exists.
+                        # Import lazily to avoid circular dependency.
+                        try:
+                            from core.intent_classifier import IntentClassifier as _IC
+                            if _IC._is_reply_content_statement(text.strip().lower(), email_context=True):
+                                _forced_email_reply = True
+                                log.info(
+                                    "[ORCHESTRATOR] Forced EMAIL_REPLY due to reply-content context "
+                                    "(intent was %s, email_ctx=True, input=%r)",
+                                    intent, text[:50],
+                                )
+                        except Exception as _ic_exc:
+                            log.debug("reply-content check failed: %s", _ic_exc)
+                    if _forced_email_reply:
                         intent = "EMAIL_REPLY"
             except Exception as _oex:
                 log.debug("Email-context safety net check failed: %s", _oex)
@@ -489,6 +507,25 @@ class Orchestrator:
                             _fqa_resp.latency_ms = (time.perf_counter() - t0) * 1_000
                             self._post_process(text, _fqa_resp, tool_name="FILE_QA")
                             return _fqa_resp
+                        else:
+                            # File known but not found at constructed path — report clearly
+                            # instead of silently querying the vector store with wrong scope.
+                            log.warning(
+                                "[SUMMARY] last_file=%r not found at %r (folder=%r)",
+                                _su_file, _su_disk, _su_fol,
+                            )
+                            _nf_resp = AgentResponse(
+                                answer=(
+                                    f"\u26a0\ufe0f Could not find **{_su_file}** at the last known "
+                                    f"location:\n\U0001f4c1 {_su_disk}\n\n"
+                                    "The file may have been moved or renamed. "
+                                    "Please open or reference the file again."
+                                ),
+                                intent=intent,
+                            )
+                            _nf_resp.latency_ms = (time.perf_counter() - t0) * 1_000
+                            self._post_process(text, _nf_resp)
+                            return _nf_resp
                     # File not on disk (or no file known) — fall back to folder scope
                     if _su_fol:
                         _forced_folder = _su_fol
@@ -779,8 +816,31 @@ class Orchestrator:
                 return self._handle_reminder_delete(text)
             case "EMAIL_SUMMARY" | "EMAIL_SUMMARIZE":
                 return self._handle_email_summary()
-            case "EMAIL_SEARCH" | "EMAIL_QUERY" | "EMAIL":
+            case "EMAIL_QUERY":
+                return self._handle_email_query(text)
+            case "EMAIL_SEARCH" | "EMAIL":
                 return self._handle_email_search(text)
+            case "EMAIL_REPLY":
+                # Failsafe dispatch path — reached only if the tool path above failed.
+                # Re-invoke via tool executor so _handle_email_reply is always called.
+                log.warning(
+                    "[ORCHESTRATOR] EMAIL_REPLY reached _dispatch fallback — "
+                    "tool path did not succeed; retrying via tool executor"
+                )
+                _te = _get_tool_executor()
+                if _te is not None:
+                    try:
+                        _tr = _te.execute("email.reply", text)
+                        if _tr is not None and _tr.success:
+                            return AgentResponse(answer=_tr.output or "")
+                    except Exception as _re_exc:
+                        log.error("[ORCHESTRATOR] EMAIL_REPLY dispatch fallback failed: %s", _re_exc)
+                return AgentResponse(
+                    answer=(
+                        "❌ Could not generate email reply. "
+                        "Please search for the email first, then ask to reply."
+                    )
+                )
             case "AUDIO_TRANSCRIBE" | "TRANSCRIPTION":
                 return self._handle_audio_transcribe(text)
             case "AUDIO_QUERY" | "AUDIO_SEARCH":
@@ -939,6 +999,43 @@ class Orchestrator:
         except ImportError:
             return AgentResponse(answer="Email service is currently unavailable.")
         return AgentResponse(answer=handle_email_summary() or "No emails to summarise.")
+
+    def _handle_email_query(self, text: str) -> AgentResponse:
+        """Answer a factual question about the email currently in memory.
+
+        Reads ``last_email`` from conversation memory and answers directly
+        (sender, date, subject, etc.).  Falls through to ``_handle_email_search``
+        only when no email context exists in memory.
+        """
+        try:
+            from memory.conversation_memory import conversation_memory
+            last_email = conversation_memory.get_last_email()
+            if last_email:
+                t = text.lower()
+                if re.search(r"\b(who|from\b|sender)\b", t):
+                    answer = f"This email was sent by: {last_email.get('from', 'Unknown')}"
+                elif re.search(r"\b(when|date|received|arrived?)\b", t):
+                    answer = f"This email was received on: {last_email.get('date', 'Unknown')}"
+                elif re.search(r"\b(subject|topic|title|about)\b", t):
+                    answer = f"Subject: {last_email.get('subject', '(no subject)')}"
+                elif re.search(r"\b(to\b|recipient|receiver)\b", t):
+                    answer = f"This email was addressed to: {last_email.get('to', 'Unknown')}"
+                else:
+                    body = (last_email.get("body") or "").strip()
+                    answer = (
+                        f"Email from {last_email.get('from', '?')}\n"
+                        f"Subject  : {last_email.get('subject', '(no subject)')}\n"
+                        f"Date     : {last_email.get('date', 'Unknown')}"
+                    )
+                    if body:
+                        preview = body[:400] + ("..." if len(body) > 400 else "")
+                        answer += f"\n\nContent:\n{preview}"
+                log.info("[EMAIL_QUERY] Answered from memory")
+                return AgentResponse(answer=answer, intent="EMAIL_QUERY")
+        except Exception as exc:
+            log.debug("[EMAIL_QUERY] Memory check in fallback failed: %s", exc)
+        # No email in memory — fall through to search
+        return self._handle_email_search(text)
 
     def _handle_email_search(self, text: str) -> AgentResponse:
         self._auto_fetch_emails(force=True)
@@ -1118,9 +1215,17 @@ class Orchestrator:
                 intent="FILE_QA",
             )
         content = _load_document_from_path(file_path)
+        log.info("[FILE_QA] Loaded %d chars from %r", len(content) if content else 0, file_path)
         if not content:
-            # Unsupported type or read error — fall through to RAG
-            return AgentResponse(answer="", intent="FILE_QA")
+            fname = os.path.basename(file_path)
+            return AgentResponse(
+                answer=(
+                    f"\u26a0\ufe0f The file **{fname}** could not be read — it may be empty, "
+                    "locked, or in an unsupported format. Please check the file and try again."
+                ),
+                intent="FILE_QA",
+                source=file_path,
+            )
         is_summary = _is_summary_intent(query)
         answer = _ask_llm(
             settings.model_name,

@@ -43,7 +43,7 @@ _INTENT_TOOL_MAP: dict[str, str] = {
 
     # Email tools
     "EMAIL_SEARCH":         "email.search",
-    "EMAIL_QUERY":          "email.search",
+    "EMAIL_QUERY":          "email.query",
     "EMAIL":                "email.search",
     "EMAIL_SUMMARY":        "email.summarize",
     "EMAIL_SUMMARIZE":      "email.summarize",

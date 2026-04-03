@@ -188,6 +188,16 @@ def improved_search_emails(query, max_results=20, use_semantic=True):
       - Combined: "meeting from susmitha", "job mail from kutluri"
     """
     q = (query or "").strip().lower()
+    # Normalize: collapse spaced compound words to joined form so "time sheet"
+    # and "timesheet" both tokenise to the same token for synonym expansion.
+    _COMPOUND_JOINS = [
+        (re.compile(r"\btime\s+sheet\b"),   "timesheet"),
+        (re.compile(r"\bfollow\s+up\b"),    "followup"),
+        (re.compile(r"\bcheck\s+in\b"),     "checkin"),
+        (re.compile(r"\btime\s+off\b"),     "timeoff"),
+    ]
+    for _pat, _rep in _COMPOUND_JOINS:
+        q = _pat.sub(_rep, q)
     emails = load_all_emails()
     if not q:
         return []
@@ -289,16 +299,27 @@ def improved_search_emails(query, max_results=20, use_semantic=True):
 
     # Synonym expansion — map query words to related terms to check in emails
     _SYNONYMS = {
-        "immediate":  ["immediate","urgent","emergency","asap","critical","soon","quickly"],
-        "immediately":["immediate","urgent","emergency","asap","critical","soon","quickly"],
-        "urgent":     ["urgent","emergency","asap","immediate","critical","important"],
-        "emergency":  ["emergency","urgent","critical","immediate","asap"],
-        "respond":    ["respond","response","reply","answer","revert"],
-        "response":   ["respond","response","reply","answer","revert"],
-        "reply":      ["reply","respond","response","answer"],
-        "meeting":    ["meeting","meet","conference","call","discussion","sync"],
-        "job":        ["job","offer","position","role","employment","work","career","hiring"],
-        "interview":  ["interview","interview","screening","candidature","selection"],
+        "immediate":    ["immediate","urgent","emergency","asap","critical","soon","quickly"],
+        "immediately":  ["immediate","urgent","emergency","asap","critical","soon","quickly"],
+        "urgent":       ["urgent","emergency","asap","immediate","critical","important"],
+        "emergency":    ["emergency","urgent","critical","immediate","asap"],
+        "respond":      ["respond","response","reply","answer","revert"],
+        "response":     ["respond","response","reply","answer","revert"],
+        "responce":     ["respond","response","reply","answer","revert"],   # typo
+        "reply":        ["reply","respond","response","answer"],
+        "meeting":      ["meeting","meet","conference","call","discussion","sync"],
+        "job":          ["job","offer","position","role","employment","work","career","hiring"],
+        "interview":    ["interview","screening","candidature","selection"],
+        "timesheet":    ["timesheet","time sheet","time-sheet","attendance","hours","timesheets"],
+        "timesheets":   ["timesheet","time sheet","time-sheet","attendance","hours","timesheets"],
+        "attendance":   ["attendance","timesheet","time sheet","present","absent"],
+        "leave":        ["leave","absence","vacation","holiday","time off","pto"],
+        "update":       ["update","status","progress","follow up","followup"],
+        "followup":     ["follow up","followup","check in","update","reminder"],
+        "follow":       ["follow up","followup","check in","update"],
+        "receive":      ["receive","received","got","obtain"],
+        "recieve":      ["receive","received","got","obtain"],   # typo
+        "recieved":     ["receive","received","got"],            # typo
     }
 
     def _expanded_tokens(t):
@@ -340,7 +361,9 @@ def improved_search_emails(query, max_results=20, use_semantic=True):
             hit_subj = any(term in subj for term in check_terms)
             hit_body = any(term in body for term in check_terms)
             hit_frm  = any(term in frm  for term in check_terms)
-            hit_fuzzy = _similar(t, subj) > 0.8
+            # Lower fuzzy threshold for short tokens to catch near-typos
+            fuzzy_thresh = 0.65 if len(t) <= 6 else 0.8
+            hit_fuzzy = _similar(t, subj) > fuzzy_thresh
 
             if hit_subj:
                 score += 1.0
