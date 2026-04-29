@@ -2,22 +2,7 @@
 main.py
 =======
 Production entry point for the Local AI Assistant.
-
-Replaces the monolithic ``smart_agent.py`` startup block with a clean
-layered boot sequence:
-
-  1. Logging configured
-  2. Documents loaded by DocumentService
-  3. VectorStoreService started (background thread)
-  4. ReminderService started (background thread)
-  5. Optional MCP server mode (--mcp / --mcp-sse flags)
-  6. Interactive CLI loop using the Orchestrator
-
-Run
----
-  venv311\\Scripts\\python main.py           # interactive mode
-  venv311\\Scripts\\python main.py --mcp     # stdio MCP server
-  venv311\\Scripts\\python main.py --mcp-sse # SSE  MCP server
+Redesigned for robust startup flow and visibility in packaged (.exe) environments.
 """
 
 from __future__ import annotations
@@ -25,260 +10,182 @@ from __future__ import annotations
 import os
 import sys
 import shutil
+import threading
+import time
 
-# ── 0. Auto-clear __pycache__ so code changes take effect immediately ───────
-_ROOT = os.path.dirname(os.path.abspath(__file__))
-for _dp, _dirs, _ in os.walk(_ROOT):
-    for _d in list(_dirs):
-        if _d == "__pycache__":
-            try:
-                shutil.rmtree(os.path.join(_dp, _d))
-            except Exception:
-                pass
-            _dirs.remove(_d)  # don't recurse into deleted dirs
+def start_main_loop():
+    """Guaranteed user interaction entry point."""
+    print("\n>>> ENTERING MAIN LOOP <<<")
+    print("\n=== AI Agent Ready ===")
+    print("Type 'exit' to quit or 'status' for system health.\n")
+    
+    from pipelines.orchestrator import orchestrator
+    from core.runtime_monitor import runtime_monitor
+    from services.reminder_service import reminder_service
+    from core.logging_config import get_logger
+    log = get_logger(__name__)
+    
+    orchestrator.startup()
 
-# ── 1. Fix Python path (allow `python main.py` from any cwd) ────────────────
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
-
-# ── 2. Suppress noisy library output before heavy imports ───────────────────
-os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-os.environ.setdefault("HF_HUB_VERBOSITY", "error")
-
-# ── 3. Auto-relaunch with venv311 if imapclient is unavailable ───────────────
-try:
-    import imapclient as _imap_check  # noqa: F401
-except ImportError:
-    import subprocess as _sp
-    _venv = os.path.join(_ROOT, "venv311", "Scripts", "python.exe")
-    if os.path.exists(_venv):
-        sys.exit(_sp.run([_venv] + sys.argv).returncode)
-    print("ERROR: venv311\\Scripts\\python.exe not found.")
-    sys.exit(1)
-
-# ── 4. Now we can import our own modules ────────────────────────────────────
-from core.logging_config import setup_logging, get_logger
-from configs.settings import settings
-
-setup_logging(level=settings.log_level, log_format=settings.log_format)
-log = get_logger(__name__)
-
-# ── 5. MCP server mode (exit before starting interactive loop) ───────────────
-if "--mcp" in sys.argv or "--mcp-sse" in sys.argv:
-    from agent_mcp.server import main as _mcp_main
-    _transport = "sse" if "--mcp-sse" in sys.argv else "stdio"
-    log.info("Starting MCP server — transport: %s", _transport)
-    _mcp_main(transport=_transport)
-    sys.exit(0)
-
-# ── 6. Boot services ────────────────────────────────────────────────────────
-from services.document_service import document_service
-from services.vector_store_service import vector_store_service
-from services.reminder_service import reminder_service
-
-log.info("Loading documents…")
-documents = document_service.load_all()
-print(f"Loaded {len(documents)} document chunk(s).")
-
-log.info("Starting vector store service…")
-vector_store_service.start(documents=documents)
-
-log.info("Starting reminder service…")
-reminder_service.start()
-
-# ── 7. Background email polling ──────────────────────────────────────────────
-import threading, time
-
-def _email_poll_loop() -> None:
-    from agents.knowledge.email_query_agent import invalidate_email_cache
-    from agents.tasks.email_agent import EmailAgent
     while True:
-        time.sleep(60)
+        # Check LLM health before prompt
+        if not runtime_monitor.is_feature_enabled("llm"):
+            print("\n[!] WARNING: AI Engine (Ollama) is currently offline.")
+            print("    Basic commands work, but AI queries will fail.")
+
         try:
-            invalidate_email_cache()
-            agent = EmailAgent()
-            if hasattr(agent, "fetch_recent_emails"):
-                new_emails = agent.fetch_recent_emails(last_n=settings.email_fetch_count)
-            else:
-                new_emails = agent.fetch_unread_emails()
-            if new_emails:
-                agent.save_to_cache(new_emails)
-        except Exception:
-            pass
+            user_input = input("You: ").strip()
 
-threading.Thread(target=_email_poll_loop, daemon=True, name="email-poller").start()
+            if user_input.lower() in ["exit", "quit"]:
+                print("Shutting down...")
+                runtime_monitor.stop()
+                reminder_service.stop()
+                break
 
-# Initial email sync
-print("[Email] Syncing inbox…")
-try:
-    from agents.tasks.email_agent import EmailAgent as _EA
-    from agents.knowledge.email_query_agent import invalidate_email_cache as _inv
-    _inv()
-    _ea = _EA()
-    _new = _ea.fetch_recent_emails(last_n=settings.email_fetch_count) if hasattr(_ea, "fetch_recent_emails") else _ea.fetch_unread_emails()
-    if _new:
-        _ea.save_to_cache(_new)
-except Exception as _exc:
-    log.debug("Initial email sync failed: %s", _exc)
+            if not user_input:
+                continue
 
-# ── 8. Import orchestrator + memory ─────────────────────────────────────────
-from pipelines.orchestrator import orchestrator
+            _cmd = user_input.lower().strip(" .?!")
 
-# ── 9. Show remembered facts on startup ─────────────────────────────────────
-try:
-    from memory.conversation_memory import conversation_memory as _memory
-    _facts_summary = _memory.facts_summary()
-    if _facts_summary:
-        print(f"\n[Memory] {_facts_summary}")
-except Exception:
-    _memory = None
+            # Special Commands
+            if _cmd in ("system status", "status", "health check"):
+                print(runtime_monitor.get_status_summary())
+                continue
 
-print("\nSmart AI Multi-Agent System Ready.\n")
-print("Examples:")
-print("  - Which is better, Python or Java?")
-print("  - Compare 'Node.js' vs 'Deno'")
-print("  - How many employees in 2024?")
-print("  - Remind me at 15:30 to call Alice")
-print("  - What tools are available?")
-print("  - Forget everything\n")
+            if _cmd in ("what tools are available", "list tools"):
+                from tools.tool_registry import tool_catalog
+                print("Assistant:\n" + tool_catalog.describe_all())
+                continue
 
-# ── 10. Interactive CLI loop ─────────────────────────────────────────────────
-while True:
-    try:
-        user_input = input("You: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\nAssistant shutting down…")
-        reminder_service.stop()
-        break
+            if _cmd in ("forget everything", "clear memory"):
+                from memory.conversation_memory import conversation_memory as _mem
+                _mem.clear()
+                print("Assistant: Memory cleared.\n")
+                continue
 
-    if not user_input:
-        continue
+            # Process Query (Orchestrator already catches errors, but we check features first)
+            if not runtime_monitor.is_feature_enabled("llm"):
+                if _cmd not in ("exit", "status", "system status", "health check"):
+                    print("Assistant: AI features are currently unavailable. Please check 'status'.\n")
+                    continue
 
-    if user_input.lower() == "exit":
-        print("Assistant shutting down…")
-        reminder_service.stop()
-        break
-
-    # ── built-in special commands ─────────────────────────────────────────────
-    _cmd = user_input.lower().strip(" .?!")
-
-    if _cmd in ("what tools are available", "list tools", "show tools", "what can you do"):
-        try:
-            from tools.tool_registry import tool_catalog
-            print("Assistant:\n" + tool_catalog.describe_all())
-        except Exception as _e:
-            print("Assistant: Tool registry unavailable.")
-        print()
-        continue
-
-    if _cmd in ("forget everything", "clear memory", "reset memory", "forget me"):
-        try:
-            from memory.conversation_memory import conversation_memory as _mem
-            _mem.clear()
-            print("Assistant: Memory cleared. I've forgotten everything about you.\n")
-        except Exception:
-            print("Assistant: Memory could not be cleared.\n")
-        continue
-
-    if _cmd in ("what do you remember", "show memory", "what do you know about me"):
-        try:
-            from memory.conversation_memory import conversation_memory as _mem
-            facts = _mem.list_facts()
-            if facts:
-                lines = "\n".join(f"  {k}: {v}" for k, v in facts.items())
-                print(f"Assistant: Here's what I remember about you:\n{lines}\n")
-            else:
-                print("Assistant: I don't have any saved facts about you yet.\n")
-        except Exception:
-            print("Assistant: Memory unavailable.\n")
-        continue
-
-    if _cmd in ("show permissions", "list permissions", "which folders are allowed", "show allowed folders"):
-        from core.access_control import ALLOWED_FOLDERS
-        from core.permission_store import permission_store as _ps
-        _dyn = _ps.get_granted_folders()
-        _lines = ["Assistant: Allowed folders:"]
-        _lines += [f"  [static]  {f}" for f in ALLOWED_FOLDERS]
-        if _dyn:
-            _lines += [f"  [granted] {f}" for f in sorted(_dyn)]
-        else:
-            _lines.append("  (no dynamically-granted folders yet)")
-        print("\n".join(_lines) + "\n")
-        continue
-
-    if _cmd.startswith("revoke access") or _cmd.startswith("remove permission"):
-        _rpath = user_input.split("access", 1)[-1].strip() if "access" in _cmd else user_input.split("permission", 1)[-1].strip()
-        if _rpath:
-            from core.permission_store import permission_store as _ps
-            _ps.revoke(_rpath)
-            print(f"Assistant: Access revoked for '{_rpath}'.\n")
-        else:
-            print("Assistant: Please specify the folder path to revoke.\n")
-        continue
-
-    response = orchestrator.run(user_input)
-    print(f"[Intent: {response.intent}]")
-
-    # ── REMINDER CONFIRM (two-step UX) ───────────────────────────────────────
-    if response.answer.startswith("__CONFIRM_REMINDER__"):
-        payload = response.answer.removeprefix("__CONFIRM_REMINDER__")
-        rtext, rtime = payload.split("||", 1)
-        print(
-            f"Assistant: I parsed this reminder as:\n"
-            f"  - Message: '{rtext}'\n"
-            f"  - Time:    {rtime}\n"
-            f"Do you want to save it? (yes/no)"
-        )
-        try:
-            conf = input("You: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            conf = "no"
-        if conf in ("y", "yes"):
-            from agents.tasks.reminder_agent import add_reminder
-            print("Assistant:", add_reminder(rtext, rtime), "\n")
-        else:
-            print("Assistant: Reminder canceled.\n")
-        continue
-
-    # ── REMINDER DELETE (smart fuzzy UX) ─────────────────────────────────────
-    if response.answer == "__PROMPT_REMINDER_DELETE__":
-        from agents.tasks.reminder_agent import handle_delete_reminder, delete_reminder, load_reminders
-        # First pass: try to match from the original user text
-        first_result = handle_delete_reminder(text)
-        print("Assistant:", first_result, "\n")
-        # If a multi-match list was returned, prompt once more for confirmation
-        if first_result.startswith("Multiple reminders match") or first_result.startswith("Which reminder"):
-            try:
-                choice = input("You: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                choice = ""
-            if choice:
-                # If user typed a number, pick that reminder by index from the list
-                reminders = load_reminders()
-                if choice.isdigit():
-                    idx = int(choice) - 1
-                    if 0 <= idx < len(reminders):
-                        r = reminders[idx]
-                        result = handle_delete_reminder(r.get("text", ""))
-                    else:
-                        result = "Invalid selection."
+            # Runtime validation for Orchestrator method
+            if not hasattr(orchestrator, "process_query"):
+                log.error("[CRITICAL] Orchestrator missing process_query method. Falling back to run().")
+                if hasattr(orchestrator, "run"):
+                    response = orchestrator.run(user_input)
                 else:
-                    result = handle_delete_reminder(choice)
-                print("Assistant:", result, "\n")
-        continue
+                    raise RuntimeError("Orchestrator has no executable method (run or process_query)")
+            else:
+                response = orchestrator.process_query(user_input)
 
-    # ── Normal response ──────────────────────────────────────────────────────
-    if response.bullets:
-        print("Assistant:")
-        for b in response.bullets:
-            print(f"  - {b}")
-        if response.source:
-            print(f"  (Source: {response.source})")
-    else:
-        print("Assistant:", response.answer)
-        if response.source:
-            print(f"  (Source: {response.source})")
+            # Standard Output
+            if response.bullets:
+                print("Assistant:")
+                for b in response.bullets:
+                    print(f"  - {b}")
+            else:
+                print("Assistant:", response.answer)
+            
+            if response.source:
+                print(f"  (Source: {response.source})")
+            print()
 
-    print()
+        except Exception as e:
+            print(f"[ERROR] Failed to process input: {e}")
+
+def main():
+    """Main startup sequence."""
+    print("=== Starting AI Agent ===")
+    
+    # ── 1. Import Validation ────────────────────────────────────────────────
+    try:
+        from core.logging_config import setup_logging, get_logger
+        from configs.settings import settings
+        from core.runtime_paths import log_runtime_info
+        from core.health_check import run_health_check
+    except ImportError as e:
+        print(f"CRITICAL: Missing core modules: {e}")
+        input("Press Enter to exit...")
+        sys.exit(1)
+
+    # ── 2. Logging & Runtime Info ───────────────────────────────────────────
+    try:
+        # Enable persistent logging
+        _LOG_FILE = os.path.join(settings.data_dir, "logs", "agent.log")
+        setup_logging(level=settings.log_level, log_format=settings.log_format, log_file=_LOG_FILE)
+        log = get_logger(__name__)
+        
+        log_runtime_info()
+    except Exception as e:
+        print(f"CRITICAL: Runtime initialization failed: {e}")
+        input("Press Enter to exit...")
+        sys.exit(1)
+
+    # ── 3. Health Check Gatekeeper ──────────────────────────────────────────
+    try:
+        if not run_health_check():
+            print("\nCRITICAL: Health check failed. System cannot start safely.")
+            input("Press Enter to exit...")
+            sys.exit(1)
+    except Exception as e:
+        print(f"CRITICAL: Health check crashed: {e}")
+        input("Press Enter to exit...")
+        sys.exit(1)
+
+    # ── 4. Boot Services (LIGHTWEIGHT — no heavy indexing) ──────────────────
+    try:
+        from services.reminder_service import reminder_service
+        from core.runtime_monitor import runtime_monitor
+
+        print("Starting services...")
+        runtime_monitor.start()
+        reminder_service.start()
+
+        # NOTE: Vector store and document indexing are NOT started here.
+        # They run on-demand when the user actually searches for files.
+        # This keeps startup instant (< 3 seconds).
+        log.info("Core services started (vector store deferred to on-demand).")
+
+        # Background Email Poller
+        def _email_poll_loop():
+            from agents.knowledge.email_query_agent import invalidate_email_cache
+            from agents.tasks.email_agent import EmailAgent
+            while True:
+                time.sleep(60)
+                try:
+                    invalidate_email_cache()
+                    agent = EmailAgent()
+                    new_emails = agent.fetch_recent_emails(last_n=settings.email_fetch_count)
+                    if new_emails:
+                        agent.save_to_cache(new_emails)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_email_poll_loop, daemon=True, name="email-poller").start()
+        
+    except Exception as e:
+        print(f"CRITICAL: Service startup failed: {e}")
+        input("Press Enter to exit...")
+        sys.exit(1)
+
+    # ── 5. Start Main Loop ──────────────────────────────────────────────────
+    start_main_loop()
+
+if __name__ == "__main__":
+    # Fix Python path
+    _ROOT = os.path.dirname(os.path.abspath(__file__))
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+
+    # Suppress noisy library output
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+    try:
+        main()
+    except Exception as e:
+        print(f"CRITICAL: Unhandled exception: {e}")
+        input("Press Enter to exit...")
+        sys.exit(1)

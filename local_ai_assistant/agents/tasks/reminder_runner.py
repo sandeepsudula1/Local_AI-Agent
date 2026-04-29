@@ -18,7 +18,11 @@ print("🔥 RUNNING LATEST reminder_runner.py")
 # ---------------------
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
-REM_FILE = os.path.join(PROJECT_ROOT, "data", "reminders.json")
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    REM_FILE = os.path.join(str(_DATA_DIR), "reminders.json")
+except Exception:
+    REM_FILE = os.path.join(PROJECT_ROOT, "data", "reminders.json")
 
 print("Reminder file path:", REM_FILE)
 

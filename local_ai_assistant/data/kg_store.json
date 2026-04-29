@@ -1,0 +1,23 @@
+{
+  "entities": [
+    {
+      "id": "sandeep",
+      "type": "Person",
+      "name": "Sandeep",
+      "properties": {}
+    },
+    {
+      "id": "ai_agent",
+      "type": "Project",
+      "name": "AI agent",
+      "properties": {}
+    }
+  ],
+  "triples": [
+    {
+      "subject": "sandeep",
+      "predicate": "works_on",
+      "object": "ai_agent"
+    }
+  ]
+}

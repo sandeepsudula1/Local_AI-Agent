@@ -21,8 +21,10 @@ taskkill /f /fi "WINDOWTITLE eq Local AI Assistant" >nul 2>&1
 echo [3/3] Loading AI Assistant (please wait ~20 seconds)...
 echo       Do NOT close this window.
 echo.
+echo Using Python:
+venv311\Scripts\python.exe --version
 
-venv311\Scripts\python.exe smart_agent.py
+venv311\Scripts\python.exe main.py
 
 echo.
 echo ============================================

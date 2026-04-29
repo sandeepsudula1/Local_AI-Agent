@@ -17,6 +17,9 @@ except Exception:
     ollama = None
     HAVE_OLLAMA = False
 
+from configs.llm_config import MODEL
+print(f"[LLM] Using model: {MODEL}")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DOCS_PATH = os.path.join(ROOT, "data", "documents")
 
@@ -78,7 +81,38 @@ _KEYWORD_STOPWORDS: frozenset = frozenset({
     "then", "than", "there", "their", "these", "file", "docs", "document",
     "please", "could", "would", "should", "find", "look", "search", "help",
     "here", "those", "just", "only", "very", "much", "many",
+    "to", "do", "the",
 })
+
+def answer_from_file(query: str, content: str, model_name: str = MODEL, file_path_used: str = None, is_summary: bool = False) -> str:
+    """Answer a query using only the provided document content (Active File mode)."""
+    try:
+        if not content or not content.strip():
+            return "The document is empty."
+        
+        source = os.path.basename(file_path_used) if file_path_used else "document"
+        
+        # Use standard relevance excerpt if too long
+        if len(content) > 12000:
+            context = _relevant_excerpt(content, query, max_chars=12000)
+        else:
+            context = content
+            
+        grounded_context = (
+            "Answer ONLY using the content below.\n"
+            "Do NOT say you cannot access files.\n\n"
+            "DOCUMENT:\n"
+            "----------------\n"
+            f"{context}\n"
+            "----------------"
+        )
+            
+        return _ask_llm(model_name, grounded_context, query, source, is_summary=is_summary)
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        print("[FILE ERROR]", str(e))
+        return "Error processing file."
 
 
 def _extract_query_keywords(query: str) -> set:
@@ -351,9 +385,12 @@ def _load_document_from_path(file_path: str) -> Optional[str]:
         try:
             from langchain_community.document_loaders import PyPDFLoader
             docs = list(PyPDFLoader(file_path).load())
-            return "\n\n".join(d.page_content for d in docs) or None
-        except Exception:
-            return None
+            text = "\n\n".join(d.page_content for d in docs).strip()
+            if not text:
+                return "Error: PDF is empty or contains only images."
+            return text
+        except Exception as e:
+            return f"Error reading PDF: {e}"
     elif ext == ".txt":
         try:
             content = open(file_path, "r", encoding="utf-8", errors="ignore").read().strip()
@@ -415,9 +452,12 @@ def _load_document_from_path(file_path: str) -> Optional[str]:
         try:
             import docx
             doc = docx.Document(file_path)
-            return "\n".join(p.text for p in doc.paragraphs) or None
-        except Exception:
-            return None
+            text = "\n".join(p.text for p in doc.paragraphs).strip()
+            if not text:
+                return "Error: DOCX is empty."
+            return text
+        except Exception as e:
+            return f"Error reading DOCX: {e}"
     elif ext == ".csv":
         try:
             df = pd.read_csv(file_path)
@@ -760,6 +800,7 @@ def _detect_content_type(context: str) -> str:
 
 
 def _ask_llm(model_name, context, query, source, *, is_summary: bool = False):
+    print("[DEBUG] LLM call count = 1")
     """Ask Ollama to answer using only the provided context. Returns answer string or None."""
     if not HAVE_OLLAMA:
         return None
@@ -802,16 +843,15 @@ def _ask_llm(model_name, context, query, source, *, is_summary: bool = False):
                 )
 
             summary_context = context if len(context) <= 16000 else context[:16000]
-            user_prompt = (
-                f"Document: {source}\n"
-                f"Content:\n{summary_context}\n\n"
-                f"Request: {query}\n\nSummary:"
-            )
+            user_prompt = f"""Summarize the following document:
+
+{summary_context}
+"""
             max_tokens = 1100
         else:
             system_prompt = (
                 "You are a Local Multi-Agent AI Assistant running on the user's computer. "
-                "You have access ONLY to documents indexed from C:\\AI_Test_Documents. "
+                "You have access ONLY to documents indexed from the configured folder. "
                 "Answer using ONLY facts explicitly stated in the CONTEXT below. "
                 "If the user mentions a specific filename, answer ONLY from that file's content. "
                 "Never use content from a different document than the one retrieved. "
@@ -828,6 +868,8 @@ def _ask_llm(model_name, context, query, source, *, is_summary: bool = False):
                 f"Question: {query}\n\nAnswer:"
             )
             max_tokens = 500
+
+        print("[FILE] Prompt created successfully")
         response = ollama.chat(
             model=model_name,
             options={"temperature": 0.0, "num_predict": max_tokens},

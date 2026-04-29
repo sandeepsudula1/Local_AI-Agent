@@ -88,11 +88,16 @@ except ImportError as _gmail_import_err:
     ) from _gmail_import_err
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths — use writable DATA_DIR for token persistence
 # ---------------------------------------------------------------------------
-_PROJECT_ROOT = Path(__file__).parent.parent
-_CREDENTIALS_FILE = _PROJECT_ROOT / "data" / "credentials.json"
-_TOKEN_FILE = _PROJECT_ROOT / "data" / "gmail_token.json"
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    _CREDENTIALS_FILE = Path(str(_DATA_DIR)) / "credentials.json"
+    _TOKEN_FILE = Path(str(_DATA_DIR)) / "gmail_token.json"
+except Exception:
+    _PROJECT_ROOT = Path(__file__).parent.parent
+    _CREDENTIALS_FILE = _PROJECT_ROOT / "data" / "credentials.json"
+    _TOKEN_FILE = _PROJECT_ROOT / "data" / "gmail_token.json"
 
 # Gmail OAuth scopes — compose only (cannot read mail)
 _SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]

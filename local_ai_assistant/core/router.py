@@ -72,6 +72,9 @@ _INTENT_TOOL_MAP: dict[str, str] = {
 }
 
 # Intents that go directly to the LLM without any tool
+# FILE_SEARCH / FILE_LIST / FILE_SELECT are handled directly by the
+# orchestrator (metadata lookup + conversational selection), NOT the tool
+# executor, so they are listed here to make router.route() return None.
 _LLM_ONLY_INTENTS: frozenset[str] = frozenset({
     "CHAT",
     "GENERAL",
@@ -80,6 +83,9 @@ _LLM_ONLY_INTENTS: frozenset[str] = frozenset({
     "DATE",
     "HELP",
     "UNKNOWN",
+    "FILE_SEARCH",
+    "FILE_LIST",
+    "FILE_SELECT",
 })
 
 

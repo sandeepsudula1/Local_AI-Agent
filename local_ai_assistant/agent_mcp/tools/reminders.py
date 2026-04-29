@@ -189,7 +189,11 @@ def reminders_list() -> dict:
     # Read raw data for the structured field
     _HERE = os.path.dirname(os.path.abspath(__file__))
     _PROJ = os.path.dirname(os.path.dirname(_HERE))
-    rem_file = os.path.join(_PROJ, "data", "reminders.json")
+    try:
+        from configs.settings import DATA_DIR as _R_DATA_DIR
+        rem_file = os.path.join(str(_R_DATA_DIR), "reminders.json")
+    except Exception:
+        rem_file = os.path.join(_PROJ, "data", "reminders.json")
 
     raw: list[dict] = []
     if os.path.exists(rem_file):

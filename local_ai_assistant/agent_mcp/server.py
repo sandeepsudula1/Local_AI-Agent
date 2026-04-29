@@ -206,8 +206,10 @@ def tool_email_list_all(limit: int = 20) -> dict:
 # ── DOCUMENT / RAG TOOLS ──────────────────────────────────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
+from configs.llm_config import MODEL_NAME
+
 @mcp.tool(name="documents.search")
-def tool_documents_search(query: str, model: str = "llama3.2:1b") -> dict:
+def tool_documents_search(query: str, model: str = MODEL_NAME) -> dict:
     """
     Answer a question using the local document knowledge base (RAG).
 
@@ -220,36 +222,39 @@ def tool_documents_search(query: str, model: str = "llama3.2:1b") -> dict:
                Examples: "What is the company revenue?",
                          "Summarise the internship report",
                          "What does company_data.csv say about Q3?"
-        model: Ollama model name (default: llama3.2:1b).
+        model: Ollama model name (default: gemma:7b).
 
     Returns:
         A dict with keys: success, query, answer, source.
     """
+    print(f"[LLM] Using model: {model}")
     return documents_search(query, model=model)
 
 
 @mcp.tool(name="documents.summarize")
-def tool_documents_summarize(model: str = "llama3.2:1b") -> dict:
+def tool_documents_summarize(model: str = MODEL_NAME) -> dict:
     """
     Produce a high-level summary of ALL documents in the knowledge base.
 
     Args:
-        model: Ollama model name (default: llama3.2:1b).
+        model: Ollama model name (default: gemma:7b).
 
     Returns:
         A dict with keys: success, document_count, summary.
     """
+    print(f"[LLM] Using model: {model}")
     return documents_summarize(model=model)
 
 
 @mcp.tool(name="documents.topics")
-def tool_documents_topics(model: str = "llama3.2:1b") -> dict:
+def tool_documents_topics(model: str = MODEL_NAME) -> dict:
     """
     Identify and group the main topics across all local documents.
 
     Returns:
         A dict with keys: success, document_count, topics (bullet-point list).
     """
+    print(f"[LLM] Using model: {model}")
     return documents_topics(model=model)
 
 
@@ -301,7 +306,7 @@ def tool_audio_transcribe(
 def tool_audio_query(
     query: str,
     filename: str = "",
-    model: str = "llama3.2:1b",
+    model: str = MODEL_NAME,
     top_k: int = 5,
 ) -> dict:
     """
@@ -321,13 +326,14 @@ def tool_audio_query(
         query:    Natural-language question about the audio content.
         filename: Optional — restrict search to a specific audio file.
                   Leave blank to search ALL indexed audio.
-        model:    Ollama model name (default: llama3.2:1b).
+        model:    Ollama model name (default: gemma:7b).
         top_k:    Number of transcript chunks to retrieve (default 5).
 
     Returns:
         A dict with keys: success, query, answer,
         sources [{filename, start_ts, end_ts, snippet}].
     """
+    print(f"[LLM] Using model: {model}")
     return audio_query(query, filename=filename, model=model, top_k=top_k)
 
 
@@ -350,7 +356,7 @@ def tool_audio_list() -> dict:
 @mcp.tool(name="system.chat")
 def tool_system_chat(
     message: str,
-    model: str = "llama3.2:1b",
+    model: str = MODEL_NAME,
     temperature: float = 0.7,
 ) -> dict:
     """
@@ -361,12 +367,13 @@ def tool_system_chat(
 
     Args:
         message:     The user's message or question.
-        model:       Ollama model name (default: llama3.2:1b).
+        model:       Ollama model name (default: gemma:7b).
         temperature: 0.0 (factual) to 1.0 (creative). Default 0.7.
 
     Returns:
         A dict with keys: success, message, reply, model.
     """
+    print(f"[LLM] Using model: {model}")
     return system_chat(message, model=model, temperature=temperature)
 
 

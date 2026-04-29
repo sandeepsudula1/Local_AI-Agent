@@ -54,6 +54,28 @@ class EmbeddingEngine:
         if self._model is not None:
             return True
 
+        # ── Pre-checks for critical dependencies ──────────────────────────────
+        # These often fail silently in PyInstaller, so we check explicitly.
+        # Skip this check in frozen mode - circular imports in PyInstaller bundles
+        # are resolved at import time, not when calling __import__()
+        import sys
+        is_frozen = getattr(sys, 'frozen', False)
+        
+        if not is_frozen:
+            critical_deps = ['packaging', 'transformers', 'tokenizers', 'safetensors']
+            for dep in critical_deps:
+                try:
+                    __import__(dep)
+                except (ImportError, AttributeError) as e:
+                    # AttributeError can occur from circular imports in frozen bundles
+                    self._error = (
+                        f"Missing critical dependency '{dep}' required for embeddings. "
+                        f"This usually indicates a PyInstaller packaging issue. "
+                        f"Original error: {e}"
+                    )
+                    log.error(self._error)
+                    return False
+
         try:
             from sentence_transformers import SentenceTransformer
             log.info("Loading embedding model: %s", self.model_name)
@@ -61,6 +83,39 @@ class EmbeddingEngine:
             self._ready = True
             log.info("Embedding model loaded successfully")
             return True
+        except ModuleNotFoundError as e:
+            # Specific handling for missing module errors
+            if 'packaging' in str(e):
+                self._error = (
+                    f"Missing 'packaging' module when loading embeddings. "
+                    f"This is a PyInstaller bundling issue. "
+                    f"The fixed .spec file should include 'packaging' in hiddenimports. "
+                    f"Original error: {e}"
+                )
+            else:
+                self._error = f"Missing module when loading embeddings: {e}"
+            log.error(self._error)
+            return False
+        except AttributeError as e:
+            # Circular import from torch in frozen bundles
+            if 'autograd' in str(e) or 'partially initialized module' in str(e):
+                self._error = (
+                    f"Circular import issue with torch in frozen bundle. "
+                    f"This is expected in PyInstaller - embeddings will not be available. "
+                    f"Original error: {e}"
+                )
+                log.warning(self._error)
+                # Don't fail - let the system continue without embeddings
+                self._model = None
+                return False
+            else:
+                self._error = f"Attribute error loading embeddings: {e}"
+                log.error(self._error)
+                return False
+        except ImportError as e:
+            self._error = f"Import error loading embeddings: {e}"
+            log.error(self._error)
+            return False
         except Exception as e:
             self._error = str(e)
             log.error("Failed to load embedding model: %s", e)
@@ -70,6 +125,11 @@ class EmbeddingEngine:
     def is_ready(self) -> bool:
         """Check if model is loaded and ready."""
         return self._ready and self._model is not None
+    
+    @property
+    def error_message(self) -> Optional[str]:
+        """Get the error message if loading failed."""
+        return self._error
 
     @property
     def embedding_dim(self) -> Optional[int]:

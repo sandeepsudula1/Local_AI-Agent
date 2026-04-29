@@ -15,7 +15,11 @@ _scheduled_timers = []
 # Correct data path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))       # /agents/tasks
 PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))   # project root
-REM_FILE = os.path.join(PROJECT_ROOT, "data", "reminders.json")
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    REM_FILE = os.path.join(str(_DATA_DIR), "reminders.json")
+except Exception:
+    REM_FILE = os.path.join(PROJECT_ROOT, "data", "reminders.json")
 
 
 # ===============================

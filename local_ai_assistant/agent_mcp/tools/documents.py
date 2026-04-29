@@ -37,11 +37,17 @@ from agents.knowledge.topic_agent     import handle_topics
 from agents.knowledge.document_list_agent import list_all_documents
 
 # ── constants (mirrors smart_agent.py settings) ────────────────────────────
-_MODEL_NAME       = "llama3.2:1b"
+from configs.llm_config import MODEL_NAME
+_MODEL_NAME       = MODEL_NAME
 _THRESHOLD        = 1.5
 _EMBEDDING_MODEL  = "sentence-transformers/all-MiniLM-L6-v2"
-_DOCS_PATH        = os.path.join(_ROOT, "data", "documents")
-_VECTOR_STORE_PATH = os.path.join(_ROOT, "data", "vector_store_v2")
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    _DOCS_PATH         = os.path.join(str(_DATA_DIR), "documents")
+    _VECTOR_STORE_PATH = os.path.join(str(_DATA_DIR), "vector_store_v2")
+except Exception:
+    _DOCS_PATH         = os.path.join(_ROOT, "data", "documents")
+    _VECTOR_STORE_PATH = os.path.join(_ROOT, "data", "vector_store_v2")
 
 # ── lazy vector DB singleton ───────────────────────────────────────────────
 # The MCP server may be started independently of smart_agent.py, so we
@@ -138,6 +144,28 @@ def _load_raw_documents() -> list:
             elif fname.endswith(".txt"):
                 text = open(fpath, "r", encoding="utf-8", errors="ignore").read()
                 docs.append(Document(page_content=text, metadata={"source": fname}))
+            elif fname.endswith(".docx"):
+                try:
+                    from docx import Document as DocxDoc
+                    doc = DocxDoc(fpath)
+                    paragraphs = []
+                    for p in doc.paragraphs:
+                        text = p.text.strip()
+                        if text:
+                            # Remove extra spaces within the line
+                            clean_text = " ".join(text.split())
+                            paragraphs.append(clean_text)
+                    for table in doc.tables:
+                        for row in table.rows:
+                            row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                            if row_text:
+                                paragraphs.append(" | ".join([" ".join(c.split()) for c in row_text]))
+                    content = "\n".join(paragraphs)
+                    if content:
+                        print("[FILE] Clean text extracted from DOCX")
+                        docs.append(Document(page_content=content, metadata={"source": fname}))
+                except Exception:
+                    pass
             elif fname.lower().endswith((".png", ".jpg", ".jpeg")):
                 # Try OCR ingestion; skip silently if Tesseract is not installed.
                 # To index images, delete data/vector_store_v2/ and restart so
@@ -181,7 +209,7 @@ def documents_search(query: str, model: str = _MODEL_NAME) -> dict:
           • "Summarise the internship report"
           • "What does company_data.csv say about Q3?"
     model : str
-        Ollama model name to use (default: llama3.2:1b).
+        Ollama model name to use (default: gemma:7b).
 
     Returns
     -------
@@ -242,7 +270,7 @@ def documents_summarize(model: str = _MODEL_NAME) -> dict:
     Parameters
     ----------
     model : str
-        Ollama model name to use (default: llama3.2:1b).
+        Ollama model name to use (default: gemma:7b).
 
     Returns
     -------
@@ -288,7 +316,7 @@ def documents_topics(model: str = _MODEL_NAME) -> dict:
     Parameters
     ----------
     model : str
-        Ollama model name to use (default: llama3.2:1b).
+        Ollama model name to use (default: gemma:7b).
 
     Returns
     -------

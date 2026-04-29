@@ -30,7 +30,8 @@ if _ROOT not in sys.path:
 from agents.core.general_agent import handle_general
 from agents.core.planner_agent import decide_intent
 
-_DEFAULT_MODEL = "llama3.2:1b"
+from configs.llm_config import MODEL_NAME
+_DEFAULT_MODEL = "llama3"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -52,7 +53,7 @@ def system_chat(
     message : str
         The user's message or question.
     model : str
-        Ollama model name (default: llama3.2:1b).
+        Ollama model name (default: mistral).
     temperature : float
         Creativity level 0.0 (factual) → 1.0 (creative). Default 0.7.
 
@@ -210,15 +211,20 @@ def system_status() -> dict:
         pass
 
     # Vector store check
+    try:
+        from configs.settings import DATA_DIR as _DATA_DIR
+        _data_root = str(_DATA_DIR)
+    except Exception:
+        _data_root = _ROOT + "/data"
     vstore_ok = (
-        os.path.exists(_ROOT + "/data/vector_store_v2")
-        and bool(list(os.scandir(_ROOT + "/data/vector_store_v2")))
+        os.path.exists(os.path.join(_data_root, "vector_store_v2"))
+        and bool(list(os.scandir(os.path.join(_data_root, "vector_store_v2"))))
     )
 
     # Document count — only count actual user document extensions (mirrors documents.list)
     _DOC_EXTS = {'.pdf', '.csv', '.txt', '.docx', '.doc', '.xlsx', '.xls', '.png', '.jpg', '.jpeg'}
     doc_count = 0
-    docs_path = os.path.join(_ROOT, "data", "documents")
+    docs_path = os.path.join(_data_root, "documents")
     if os.path.exists(docs_path):
         doc_count = sum(
             1 for f in os.listdir(docs_path)
@@ -228,7 +234,7 @@ def system_status() -> dict:
 
     # Reminders count
     rem_count = 0
-    rem_path  = os.path.join(_ROOT, "data", "reminders.json")
+    rem_path  = os.path.join(_data_root, "reminders.json")
     if os.path.exists(rem_path):
         try:
             rem_count = len(json.load(open(rem_path)))
@@ -239,7 +245,7 @@ def system_status() -> dict:
         "success": True,
         "timestamp": datetime.now().isoformat(),
         "ollama_available": ollama_ok,
-        "model": _DEFAULT_MODEL,
+        "model": "llama3",
         "vector_store_ready": vstore_ok,
         "document_count": doc_count,
         "reminders_count": rem_count,

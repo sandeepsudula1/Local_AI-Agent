@@ -54,8 +54,19 @@ def load_embeddings(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
     )
 
 
-def create_vector_db(chunks: list, persist_directory: str = "data/vector_store"):
+def _default_vector_store_path() -> str:
+    """Return the writable default persist directory for the legacy helpers."""
+    try:
+        from configs.settings import DATA_DIR as _DATA_DIR
+        return str(_DATA_DIR / "vector_store")
+    except Exception:
+        return "data/vector_store"
+
+
+def create_vector_db(chunks: list, persist_directory: str | None = None):
     """Create and persist a new Chroma vector store from *chunks*."""
+    if persist_directory is None:
+        persist_directory = _default_vector_store_path()
     from langchain_community.vectorstores import Chroma
     emb = load_embeddings()
     return Chroma.from_documents(
@@ -65,8 +76,10 @@ def create_vector_db(chunks: list, persist_directory: str = "data/vector_store")
     )
 
 
-def load_vector_db(persist_directory: str = "data/vector_store"):
+def load_vector_db(persist_directory: str | None = None):
     """Load an existing persisted Chroma vector store."""
+    if persist_directory is None:
+        persist_directory = _default_vector_store_path()
     from langchain_community.vectorstores import Chroma
     emb = load_embeddings()
     return Chroma(embedding_function=emb, persist_directory=persist_directory)
@@ -194,23 +207,30 @@ def _build_context(docs: list[_DocScore]) -> tuple[str, str]:
     return context, source_str
 
 
-_RAG_SYSTEM_PROMPT = (
-    "You are a Local Multi-Agent AI Assistant running on the user's computer. "
-    "You have access ONLY to documents indexed from C:\\AI_Test_Documents. "
-    "The folder C:\\Users\\Sandeep\\OneDrive\\Documents is NOT indexed and must never be used. "
-    "Answer using ONLY information present in the CONTEXT provided. "
-    "If the user mentions a specific filename (.pdf, .txt, .csv, .docx etc.), "
-    "answer ONLY from that exact file's content if it appears in the context. "
-    "Never answer from a different document unless that document was actually retrieved. "
-    "Do NOT repeatedly answer from the same document unless the retrieved context actually comes from that document. "
-    "Be concise — 1 to 3 sentences maximum unless detail is requested. "
-    "State numbers, names, and dates directly. "
-    "Never hallucinate, guess, or fabricate document content. "
-    "If the user asks about files in any other folder, say: "
-    "'I do not have access to that file or folder.' "
-    "If the context lacks the answer, say: "
-    "'The indexed documents do not contain information about this.'"
-)
+def _get_rag_system_prompt() -> str:
+    """Build the RAG system prompt with dynamic paths from settings."""
+    try:
+        from configs.settings import settings
+        docs_path = str(settings.windows_docs_path)
+    except Exception:
+        docs_path = "the configured documents folder"
+    return (
+        "You are a Local Multi-Agent AI Assistant running on the user's computer. "
+        f"You have access ONLY to documents indexed from the configured folder. "
+        "Answer using ONLY information present in the CONTEXT provided. "
+        "If the user mentions a specific filename (.pdf, .txt, .csv, .docx etc.), "
+        "answer ONLY from that exact file's content if it appears in the context. "
+        "Never answer from a different document unless that document was actually retrieved. "
+        "Do NOT repeatedly answer from the same document unless the retrieved context actually comes from that document. "
+        "Be concise — 1 to 3 sentences maximum unless detail is requested. "
+        "State numbers, names, and dates directly. "
+        "Never hallucinate, guess, or fabricate document content. "
+        "If the user asks about files in any other folder, say: "
+        "'I do not have access to that file or folder.' "
+        "If the context lacks the answer, say: "
+        "'The indexed documents do not contain information about this.'"
+    )
+
 
 
 def rag_answer(
@@ -248,10 +268,10 @@ def rag_answer(
     """
     if model_name is None:
         try:
-            from configs.settings import settings
-            model_name = settings.model_name
+            from configs.llm_config import MODEL
+            model_name = MODEL
         except Exception:
-            model_name = "llama3.2:1b"
+            model_name = "qwen2.5:3b"
 
     # Retrieve candidates
     candidates = retrieve_top_k(query, vector_db, k=initial_k)
@@ -278,11 +298,12 @@ def rag_answer(
     # LLM synthesis
     try:
         import ollama
+        print(f"[LLM] Using model: {model_name}")
         resp = ollama.chat(
             model=model_name,
             options={"temperature": 0.0, "num_predict": 250},
             messages=[
-                {"role": "system", "content": _RAG_SYSTEM_PROMPT},
+                {"role": "system", "content": _get_rag_system_prompt()},
                 {
                     "role": "user",
                     "content": (
@@ -321,3 +342,105 @@ def retrieve_answer(
     if score > threshold:
         return None, None
     return doc.page_content, doc.metadata.get("source")
+
+
+# ---------------------------------------------------------------------------
+# Progressive retrieval  — FAST / DEEP modes
+# ---------------------------------------------------------------------------
+
+_DEEP_QUERY_RE = None  # compiled lazily
+
+
+def _is_deep_query(query: str) -> bool:
+    """Return True when the query looks like it needs full RAG (DEEP mode).
+
+    Simple noun/filename-only queries → FAST.
+    Question-form queries (who/what/why/how/explain/…) → DEEP.
+    """
+    global _DEEP_QUERY_RE
+    if _DEEP_QUERY_RE is None:
+        import re as _re
+        _DEEP_QUERY_RE = _re.compile(
+            r"\b(who|what|why|when|how|where|explain|describe|analyze|analyse"
+            r"|tell me|list all|summarize|summarise|compare|vs|versus"
+            r"|what is|what are|what does|does it|is there|are there)\b",
+            _re.IGNORECASE,
+        )
+    return bool(_DEEP_QUERY_RE.search(query))
+
+
+def fast_retrieve(
+    query: str,
+    file_path: str,
+    keyword: Optional[str] = None,
+    window: int = 200,
+    max_windows: int = 3,
+) -> tuple[Optional[str], Optional[str]]:
+    """FAST mode: keyword-window extraction from disk, no vector search.
+
+    Returns (text_snippet, source) or (None, None) on miss.
+    """
+    try:
+        from services.file_indexer_service import file_indexer
+        kw = keyword or query.split()[0] if query.strip() else ""
+        snippet = file_indexer.keyword_window(file_path, kw, window=window, max_windows=max_windows)
+        if snippet:
+            return snippet, file_path
+        # Fallback: partial extract
+        partial = file_indexer.extract_partial(file_path, max_chars=3000)
+        if partial:
+            return partial, file_path
+    except Exception as exc:
+        log.debug("fast_retrieve failed for %r: %s", file_path, exc)
+    return None, None
+
+
+def progressive_retrieve(
+    query: str,
+    vector_db,
+    file_path: Optional[str] = None,
+    model_name: Optional[str] = None,
+    threshold: float = 1.5,
+    top_k: int = 5,
+) -> tuple[Optional[str], Optional[str]]:
+    """Select FAST or DEEP retrieval based on query complexity.
+
+    FAST mode
+    ---------
+    - Short query (≤ 4 words) OR no question-form verbs
+    - ``file_path`` is provided and on disk
+    - Returns keyword-window text directly (no LLM)
+
+    DEEP mode
+    ---------
+    - Question-form query  OR  FAST mode produced no result
+    - Full RAG pipeline via ``rag_answer()``
+
+    Returns (answer, source).
+    """
+    # Try FAST path first when a concrete file is given
+    if file_path:
+        import os as _os
+        if _os.path.isfile(file_path) and not _is_deep_query(query):
+            log.debug("[PROGRESSIVE] FAST mode for %r", file_path)
+            fast_ans, fast_src = fast_retrieve(query, file_path, keyword=query.split()[0] if query.strip() else "")
+            if fast_ans:
+                return fast_ans, fast_src
+            log.debug("[PROGRESSIVE] FAST miss — falling through to DEEP")
+
+    # DEEP path: full RAG
+    if vector_db is not None:
+        log.debug("[PROGRESSIVE] DEEP mode (vector_db)")
+        return rag_answer(
+            query,
+            vector_db,
+            model_name=model_name,
+            threshold=threshold,
+            top_k=top_k,
+        )
+
+    # Last resort: FAST with no keyword filter
+    if file_path:
+        return fast_retrieve(query, file_path)
+
+    return None, None

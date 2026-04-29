@@ -36,7 +36,13 @@ _PENDING_TIMEOUT_SECONDS: float = 300.0  # 5 minutes
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))   # core/
 _PROJECT_ROOT = os.path.dirname(_MODULE_DIR)                # project root
-_STORE_FILE = os.path.join(_PROJECT_ROOT, "data", "granted_folders.json")
+
+# Use the writable DATA_DIR so granted folders persist after EXE install
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    _STORE_FILE = os.path.join(str(_DATA_DIR), "granted_folders.json")
+except Exception:
+    _STORE_FILE = os.path.join(_PROJECT_ROOT, "data", "granted_folders.json")
 
 # Canonical approve / deny vocabulary — used by handle_response() and by any
 # UI layer that needs to display the supported words to the user.

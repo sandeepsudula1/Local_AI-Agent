@@ -51,7 +51,11 @@ def _start_reminder_poller():
     from agents.tasks.notification_agent import notify as _notify
     import dateparser as _dp
 
-    _rem_file = os.path.join(_ROOT, "data", "reminders.json")
+    try:
+        from configs.settings import DATA_DIR as _DATA_DIR
+        _rem_file = os.path.join(str(_DATA_DIR), "reminders.json")
+    except Exception:
+        _rem_file = os.path.join(_ROOT, "data", "reminders.json")
 
     def _load():
         if os.path.exists(_rem_file):

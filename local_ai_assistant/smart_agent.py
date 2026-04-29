@@ -56,8 +56,25 @@ except ImportError:
 # ================================
 # IMPORT AGENTS
 # ================================
-from agents.core.planner_agent import decide_intent
+from agents.core.planner_agent import decide_intent, get_semantic_mode, is_followup_query
 from agents.core.general_agent import handle_general
+from services.file_search_service import file_search_service
+
+# Tracking active file for context-aware follow-ups
+_active_file_path = None
+_active_file_content = None
+
+# ── Knowledge Graph v2 ───────────────────────────────────────────────────────
+try:
+    from knowledge_graph.v2 import extract_triples, get_context_for_llm
+    _KG_ENABLED = True
+except Exception as _kg_import_err:
+    print(f"[KG] Warning: could not import knowledge graph — {_kg_import_err}")
+    _KG_ENABLED = False
+    def extract_triples(text):  # no-op stubs
+        return []
+    def get_context_for_llm(query):
+        return ""
 
 # Reminder Agent
 from agents.tasks.reminder_agent import (
@@ -106,6 +123,59 @@ except Exception:
     _MCP_ENABLED = False
 
 
+def _is_explicit_file_query(text: str) -> bool:
+    """Check if the query clearly refers to a file or document (Safety Control)."""
+    file_path_pattern = re.compile(r'([a-zA-Z]:\\[\\\w\s.-]+|[\w\s.-]+\.(pdf|csv|txt|docx|doc|xls|xlsx|png|jpg|jpeg|mp3|wav|m4a|py|js|html|css|json|md))', re.IGNORECASE)
+    doc_explicit = re.compile(r'\b(document|file|report|resume|spreadsheet|content of)\b', re.IGNORECASE)
+    return bool(file_path_pattern.search(text) or doc_explicit.search(text))
+
+
+# ── Graph-aware LLM helper ────────────────────────────────────────────────────
+def _handle_with_graph_context(
+    user_input: str,
+    graph_context: str,
+    model_name: str,
+    memory=None,
+):
+    """Call the LLM with Knowledge Graph facts injected into the system prompt."""
+    import ollama as _ollama_local
+
+    system_prompt = (
+        "You are a smart personal AI assistant.  "
+        "Answer the user's question using ONLY the facts provided below.  "
+        "Do not hallucinate or invent facts that are not listed.  "
+        "If the facts are insufficient, say so honestly.\n\n"
+        "[Knowledge Graph Facts]\n"
+        + graph_context
+    )
+
+    if memory is not None:
+        try:
+            messages = memory.build_messages(
+                system_prompt=system_prompt,
+                user_query=user_input,
+                include_history=4,
+            )
+        except Exception:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_input},
+            ]
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_input},
+        ]
+
+    print(f"[LLM] Using model: {MODEL}")
+    resp = _ollama_local.chat(
+        model=MODEL,
+        options={"temperature": 0.3, "num_predict": 300},
+        messages=messages,
+    )
+    return resp["message"]["content"]
+
+
 def _collapse_repeated_lines(text, max_repeats=2):
     """Collapse consecutive repeated lines to at most `max_repeats` occurrences."""
     if not text:
@@ -146,13 +216,22 @@ def _summarize_snippet(text, max_paragraphs=3):
 # ================================
 # CONFIG
 # ================================
+from configs.llm_config import MODEL
+MODEL_NAME = MODEL
 THRESHOLD = 1.5
-MODEL_NAME = "llama3.2:1b"
 
 DOCS_PATH = os.path.join("data", "documents")
 # Use a versioned path so any leftover incompatible Chroma SQLite files
 # (which Windows may keep locked) are automatically bypassed.
 VECTOR_STORE_PATH = os.path.join("data", "vector_store_v2")
+
+# Override paths with writable DATA_DIR when running as frozen EXE
+try:
+    from configs.settings import DATA_DIR as _SMART_DATA_DIR
+    DOCS_PATH = os.path.join(str(_SMART_DATA_DIR), "documents")
+    VECTOR_STORE_PATH = os.path.join(str(_SMART_DATA_DIR), "vector_store_v2")
+except Exception:
+    pass
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 
@@ -332,7 +411,11 @@ def _reminder_poll_loop():
     import dateparser as _dp
 
     _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-    _REM_FILE = os.path.join(_CURRENT_DIR, "data", "reminders.json")
+    try:
+        from configs.settings import DATA_DIR as _REM_DATA_DIR
+        _REM_FILE = os.path.join(str(_REM_DATA_DIR), "reminders.json")
+    except Exception:
+        _REM_FILE = os.path.join(_CURRENT_DIR, "data", "reminders.json")
 
     def _load():
         if os.path.exists(_REM_FILE):
@@ -384,6 +467,14 @@ def _reminder_poll_loop():
 
 _reminder_thread = threading.Thread(target=_reminder_poll_loop, daemon=True)
 _reminder_thread.start()
+
+# ============================================================
+# SESSION MEMORY (context continuity across turns)
+# ============================================================
+try:
+    from memory.conversation_memory import conversation_memory as _session_memory
+except Exception:
+    _session_memory = None
 
 print("\nSmart AI Multi-Agent System Ready.\n")
 print("Examples: \n- Which is better, Python or Java?\n- Compare 'Node.js' vs 'Deno'\n")
@@ -531,7 +622,11 @@ def load_all_emails():
     emails = []
 
     # emails.json (manual)
-    email_json = "data/emails.json"
+    try:
+        from configs.settings import DATA_DIR as _EM_DATA_DIR
+        email_json = os.path.join(str(_EM_DATA_DIR), "emails.json")
+    except Exception:
+        email_json = "data/emails.json"
     if os.path.exists(email_json):
         try:
             emails.extend(json.load(open(email_json)))
@@ -539,7 +634,11 @@ def load_all_emails():
             pass
 
     # email_cache.json (IMAP fetched)
-    email_cache = "data/email_cache.json"
+    try:
+        from configs.settings import DATA_DIR as _EM_DATA_DIR2
+        email_cache = os.path.join(str(_EM_DATA_DIR2), "email_cache.json")
+    except Exception:
+        email_cache = "data/email_cache.json"
     if os.path.exists(email_cache):
         try:
             cache = json.load(open(email_cache))
@@ -631,15 +730,110 @@ while True:
         print("Assistant:", sys_out, "\n")
         continue
 
-    # Short conversational responses should never trigger document lookup.
-    # Route them straight to the LLM without scanning docs.
-    _CONVERSATIONAL = {"yes", "no", "ok", "okay", "sure", "thanks",
-                       "thank you", "alright", "nope", "yep", "yup",
-                       "nah", "bye", "got it", "cool", "nice"}
-    if user_input.lower().strip() in _CONVERSATIONAL:
-        print("Assistant:", handle_general(user_input, MODEL_NAME), "\n")
+    # ══════════════════════════════════════════════════════════════════════
+    # STEP 0 — Semantic Intent Detection & Context Tracking
+    # ══════════════════════════════════════════════════════════════════════
+    # Detect follow-up if there's an active file
+    is_followup = False
+    if _active_file_path:
+        print("[FILE] Active file detected")
+        is_followup = is_followup_query(user_input)
+        
+    if is_followup:
+        print("[ROUTER] Mode selected: FILE_QA")
+        # Route to FILE_QA
+        from agents.knowledge.retrieval_agent import answer_from_file
+        _ans = answer_from_file(user_input, _active_file_content, model_name=MODEL_NAME)
+        print("Assistant:", _ans, "\n")
+        if _session_memory:
+            _session_memory.add_turn("user", user_input)
+            _session_memory.add_turn("assistant", (_ans or "")[:500])
         continue
 
+    semantic_mode = get_semantic_mode(user_input)
+
+    if semantic_mode == "CLARIFY":
+        print("Assistant: I'm sorry, I'm not sure I understand. Could you please provide more details or rephrase your request?\n")
+        continue
+
+    if semantic_mode == "FILE_SEARCH":
+        results = file_search_service.search(user_input)
+        if len(results) == 1:
+            # Auto-select the single result
+            path = results[0]["path"]
+            print(f"[FILE] Auto-selected: {os.path.basename(path)}")
+            _active_file_path = path
+            try:
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    _active_file_content = f.read()
+            except Exception as e:
+                print(f"[FILE] Error reading file: {e}")
+                _active_file_content = ""
+            
+            # Show a brief confirmation or summary
+            print(f"Assistant: I've selected **{os.path.basename(path)}**. What would you like to do with it? (e.g., summarize it)\n")
+        else:
+            listing = file_search_service.format_listing(results)
+            print("Assistant:", listing, "\n")
+        continue
+
+    if semantic_mode == "GENERAL":
+        # EXIT FILE MODE if unrelated query
+        if _active_file_path:
+            print("[FILE] Unrelated query in file mode — clearing active file.")
+            _active_file_path = None
+            _active_file_content = None
+            
+        _ans = handle_general(user_input, MODEL_NAME, memory=_session_memory)
+        print("Assistant:", _ans, "\n")
+        if _session_memory:
+            _session_memory.add_turn("user", user_input)
+            _session_memory.add_turn("assistant", (_ans or "")[:500])
+        continue
+
+    # If semantic_mode == TOOL, fall through to Knowledge Graph and Intent Classifier
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STEP 1 — Always extract & store triples from the user's message
+    # ══════════════════════════════════════════════════════════════════════
+    if _KG_ENABLED:
+        try:
+            _triples = extract_triples(user_input)
+            if _triples:
+                print(f"[KG] Stored {len(_triples)} triple(s): {_triples}")
+            else:
+                print("[KG] No triples extracted from this message.")
+        except Exception as _te:
+            print(f"[KG] Triple extraction error: {_te}")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STEP 2 — Graph-first retrieval (BEFORE intent classification)
+    # ══════════════════════════════════════════════════════════════════════
+    _kg_context = ""
+    if _KG_ENABLED:
+        try:
+            _kg_context = get_context_for_llm(user_input)
+        except Exception as _re:
+            print(f"[KG] Context retrieval error: {_re}")
+            _kg_context = ""
+
+    if _kg_context:
+        print(f"[KG] Graph context found — skipping intent classifier.")
+        print(f"[KG] Context:\n{_kg_context}")
+        _ans = _handle_with_graph_context(
+            user_input, _kg_context, MODEL_NAME, memory=_session_memory
+        )
+        print("Assistant:", _ans, "\n")
+        if _session_memory:
+            _session_memory.add_turn("user", user_input)
+            _session_memory.add_turn("assistant", (_ans or "")[:500])
+        continue
+    else:
+        print("[KG] No graph context found — falling through to intent classifier.")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STEP 3 — Graph returned nothing: run intent classifier as normal
+    # ══════════════════════════════════════════════════════════════════════
     # WHAT USER WANTS?
     intent = decide_intent(user_input)
     print("Planner Decision:", intent)
@@ -648,7 +842,11 @@ while True:
     # CHAT — pure conversation, no doc lookup
     # ======================================
     if intent == "CHAT":
-        print("Assistant:", handle_general(user_input, MODEL_NAME), "\n")
+        _ans = handle_general(user_input, MODEL_NAME, memory=_session_memory)
+        print("Assistant:", _ans, "\n")
+        if _session_memory:
+            _session_memory.add_turn("user", user_input)
+            _session_memory.add_turn("assistant", (_ans or "")[:500])
         continue
 
     # ======================================
@@ -685,8 +883,14 @@ while True:
                 pass
 
         if not answered:
-            # Pure LLM response — handles conversational and general knowledge questions
-            print("Assistant:", handle_general(user_input, MODEL_NAME), "\n")
+            # Pure LLM response with memory context
+            _ans = handle_general(user_input, MODEL_NAME, memory=_session_memory)
+            print("Assistant:", _ans, "\n")
+            if _session_memory:
+                _session_memory.add_turn("user", user_input)
+                _session_memory.add_turn("assistant", (_ans or "")[:500])
+        elif _session_memory:
+            _session_memory.add_turn("user", user_input)
         continue
 
     # ======================================
@@ -786,6 +990,18 @@ while True:
     # RETRIEVAL (RAG)
     # ======================================
     if intent == "RETRIEVAL":
+        # Guard: only do file/vector search for explicit file-related queries.
+        # Prevents personal-fact queries ("What is Sandeep working on?") from
+        # going to RAG when the KG already handled them above.
+        if not _is_explicit_file_query(user_input):
+            print("[KG] RETRIEVAL intent but no explicit file keyword — routing to LLM.")
+            _ans = handle_general(user_input, MODEL_NAME, memory=_session_memory)
+            print("Assistant:", _ans, "\n")
+            if _session_memory:
+                _session_memory.add_turn("user", user_input)
+                _session_memory.add_turn("assistant", (_ans or "")[:500])
+            continue
+
         # If vector DB is still building, fallback to LLM immediately — don't block the user
         if not vector_ready or vector_db is None:
             print("Assistant:", handle_general(user_input, MODEL_NAME), "\n")
@@ -841,8 +1057,10 @@ while True:
         print("\n")
         continue
 
-    # ======================================
-    # FALLBACK (LLM)
-    # ======================================
-    print("Assistant:", handle_general(user_input, MODEL_NAME), "\n")
+    # FALLBACK (LLM) — with memory context for continuity
+    _ans = handle_general(user_input, MODEL_NAME, memory=_session_memory)
+    print("Assistant:", _ans, "\n")
+    if _session_memory:
+        _session_memory.add_turn("user", user_input)
+        _session_memory.add_turn("assistant", (_ans or "")[:500])
     

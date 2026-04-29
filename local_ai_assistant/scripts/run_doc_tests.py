@@ -10,7 +10,7 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 DOCS_PATH = os.path.join(ROOT, 'data', 'documents')
 VECTOR_STORE_PATH = os.path.join(ROOT, 'data', 'vector_store')
 EMBEDDING_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
-MODEL_NAME = 'llama3.2:1b'
+MODEL_NAME = 'gemma:7b'
 THRESHOLD = 1.5
 
 # load documents (same as smart_agent)

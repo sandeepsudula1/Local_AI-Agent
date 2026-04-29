@@ -33,7 +33,7 @@ MCP Client (Claude Desktop / VS Code / custom)
   agents/**/*_agent.py      ← ORIGINAL agents — completely unchanged
         │
         ▼
-  engines/rag_engine.py + ChromaDB + Ollama (llama3.2:1b)
+  engines/rag_engine.py + ChromaDB + Ollama (llama3)
 ```
 
 Optional in-process path (no separate server needed):

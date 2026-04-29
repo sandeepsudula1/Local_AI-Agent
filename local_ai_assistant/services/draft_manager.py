@@ -42,9 +42,13 @@ import threading
 
 log = logging.getLogger(__name__)
 
-# Path to persist drafts (ABSOLUTE PATH)
-_PROJECT_ROOT = Path(__file__).parent.parent
-DRAFTS_FILE = (_PROJECT_ROOT / "data" / "drafts.json").resolve()
+# Path to persist drafts — use writable DATA_DIR for EXE deployments
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    DRAFTS_FILE = (_DATA_DIR / "drafts.json").resolve()
+except Exception:
+    _PROJECT_ROOT = Path(__file__).parent.parent
+    DRAFTS_FILE = (_PROJECT_ROOT / "data" / "drafts.json").resolve()
 
 
 @dataclass

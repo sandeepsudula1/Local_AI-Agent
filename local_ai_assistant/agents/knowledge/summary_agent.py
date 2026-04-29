@@ -1,4 +1,5 @@
 import ollama
+from configs.llm_config import MODEL
 
 def handle_summary(documents, model_name):
 
@@ -13,8 +14,9 @@ def handle_summary(documents, model_name):
     # Limit total size
     combined_text = "\n\n".join(collected_text[:30])  # limit to 30 docs
 
+    print(f"[LLM] Using model: {MODEL}")
     response = ollama.chat(
-        model=model_name,
+        model=MODEL,
         options={
             "temperature": 0.0,
             "num_predict": 250

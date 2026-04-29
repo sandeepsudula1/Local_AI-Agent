@@ -3,7 +3,11 @@ import os
 # Always resolve relative to the project root, not the CWD
 _AGENT_KN_DIR = os.path.dirname(os.path.abspath(__file__))     # agents/knowledge
 _PROJECT_ROOT  = os.path.dirname(os.path.dirname(_AGENT_KN_DIR))  # project root
-_DEFAULT_DOCS_PATH = os.path.join(_PROJECT_ROOT, "data", "documents")
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    _DEFAULT_DOCS_PATH = os.path.join(str(_DATA_DIR), "documents")
+except Exception:
+    _DEFAULT_DOCS_PATH = os.path.join(_PROJECT_ROOT, "data", "documents")
 
 # Only show user-created document files; exclude system/internal files
 _DOCUMENT_EXTENSIONS = {

@@ -39,6 +39,7 @@ import re
 from typing import Optional
 
 from core.logging_config import get_logger
+from configs.llm_config import MODEL
 
 log = get_logger(__name__)
 
@@ -47,19 +48,21 @@ _VALID_INTENTS: frozenset[str] = frozenset({
     "REMINDER_SET", "REMINDER_LIST", "REMINDER_DELETE",
     "EMAIL_SUMMARY", "EMAIL_SUMMARIZE", "EMAIL_QUERY",
     "EMAIL_SEARCH", "EMAIL_REPLY", "EMAIL_SEND",
-    "DOCUMENT_LIST", "SUMMARY", "TOPIC", "RETRIEVAL",
+    "DOCUMENT_LIST", "DOCUMENT_SEARCH", "SUMMARY", "RETRIEVAL",
+    "FILE_SEARCH", "FILE_LIST", "FILE_SELECT",
     "AUDIO_TRANSCRIBE", "AUDIO_QUERY", "AUDIO_LIST",
     "COMPARE", "CHAT", "GENERAL",
+    "MEMORY_STORE", "MEMORY_RECALL", "INVALID_INPUT",
 })
 
 _SYSTEM_PROMPT = """You classify user messages into intent labels. Respond ONLY with JSON.
 
 Format (required):
-{"intent": "INTENT_NAME", "confidence": 0.95}
+{"intent": "INTENT_NAME", "confidence": 95}
 
 Valid intent names (pick exactly one):
 GREETING, TIME, DATE, CHAT, GENERAL,
-RETRIEVAL, SUMMARY, TOPIC, DOCUMENT_LIST,
+RETRIEVAL, SUMMARY, DOCUMENT_LIST,
 EMAIL_SUMMARY, EMAIL_SUMMARIZE, EMAIL_QUERY, EMAIL_SEARCH, EMAIL_REPLY, EMAIL_SEND,
 REMINDER_SET, REMINDER_LIST, REMINDER_DELETE,
 AUDIO_TRANSCRIBE, AUDIO_QUERY, AUDIO_LIST,
@@ -72,8 +75,18 @@ Key classification rules:
 - EMAIL_SUMMARIZE : summarize this email / what is this email about / what does it say / give me the gist
 - EMAIL_QUERY     : factual questions about an email — who sent it / when / what is the subject
 - REMINDER_SET    : remind me at / set a reminder / alert me when / in X minutes
-- RETRIEVAL       : questions about documents, reports, or stored data
-- GENERAL         : open questions, comparisons, general knowledge
+- RETRIEVAL       : questions about document CONTENT (what does X say / explain X / search in Y)
+- FILE_SEARCH     : find / locate / open / show a specific file or document by name (no content needed)
+- FILE_LIST       : list all files / show all files / what files are available
+- DOCUMENT_SEARCH : find / open / locate a specific file or document by name or keyword
+- GENERAL         : open questions, comparisons, general knowledge, system/project queries
+
+CRITICAL: Classify intent based ONLY on the current query.
+Ignore previous conversation messages unless the query EXPLICITLY refers to them
+(e.g. "reply to that email", "summarize it", "send it").
+Do NOT return EMAIL_* intent unless the current query contains clear email keywords
+(email, mail, inbox, reply, send, draft, compose, message).
+Do NOT return FILE_SEARCH / FILE_LIST unless the query is about finding or listing files.
 
 Output ONLY the JSON object. No explanations, no extra text."""
 
@@ -98,13 +111,7 @@ class IntentClassifier:
         self._model_name = model_name
 
     def _model(self) -> str:
-        if self._model_name:
-            return self._model_name
-        try:
-            from configs.settings import settings
-            return settings.model_name
-        except Exception:
-            return "llama3.2:1b"
+        return MODEL
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -128,21 +135,60 @@ class IntentClassifier:
         """
         text = query.strip()
         # Strip noise characters (bullet symbols, decorators) that confuse classification.
-        text = re.sub(r"[\u2022\u25cf\u25c6\u25b6\u25ba\u25b8\u25b7\u25e6\u2023\u2043]", "", text).strip()
+        text = re.sub("[\u2022\u25cf\u25c6\u25b6\u25ba\u25b8\u25b7\u25e6\u2023\u2043]", "", text).strip()
         if not text:
             return "GENERAL"
 
+        # Pre-step 0: MEMORY/INVALID fast-exit — must run BEFORE the anaphoric
+        # context-followup check at step 0, because _FOLLOWUP_PATTERN contains
+        # \bthat\b which hijacks "Remember that my favorite language is Python"
+        # and routes it to RETRIEVAL before the MEMORY_STORE regex ever fires.
+        _pre_memory = self._regex_fastpath(text)
+        if _pre_memory in {"MEMORY_STORE", "MEMORY_RECALL", "INVALID_INPUT"}:
+            log.info("[INTENT] pre-step0-fastpath -> %s | %r", _pre_memory, text[:60])
+            return _pre_memory
+
         # 0. Anaphoric document follow-up short-circuit (RETRIEVAL / SUMMARY)
-        if last_file:
+        # Resolve effective last_file: actual last_file OR selected_file from memory
+        _eff_last_file = last_file
+        if not _eff_last_file:
+            try:
+                from memory.conversation_memory import conversation_memory as _cm0
+                _eff_last_file = _cm0.get_selected_file() or None
+            except Exception:
+                pass
+
+        # ── 0.0a. Summarize/explain + anaphoric ref ("above document",
+        #    "that file", "this") — fires even when no last_file is known,
+        #    because pending_documents or selected_file may hold the target.
+        _is_summarize = bool(re.search(
+            r"\b(?:summ(?:ar|er)i[szwe]\w*|summary|explain|overview|gist|describe)\b",
+            text, re.IGNORECASE,
+        ))
+        _has_anaphoric = bool(_FOLLOWUP_PATTERN.search(text))
+        if _is_summarize and _has_anaphoric:
+            if _eff_last_file:
+                log.info("[INTENT] context-followup -> SUMMARY (eff_last_file=%r)", _eff_last_file)
+                return "SUMMARY"
+            # Check pending_documents in memory — user said "summarize above"
+            # after a file listing was returned.
+            try:
+                from memory.conversation_memory import conversation_memory as _cm0b
+                if _cm0b.get_pending_documents() or _cm0b.get_pending_file_selection():
+                    log.info("[INTENT] context-followup -> SUMMARY (pending_documents)")
+                    return "SUMMARY"
+            except Exception:
+                pass
+
+        if _eff_last_file:
             # Explicit summarize request — checked FIRST so "summarize it" returns
             # SUMMARY rather than RETRIEVAL (which _FOLLOWUP_PATTERN would produce).
-            # Pattern covers typos: summarize/summarise/summarizw/summerize.
-            if re.search(r"\bsumm(?:ar|er)i[szwe]\w*\b", text, re.IGNORECASE):
-                log.info("[INTENT] context-followup -> SUMMARY (last_file=%r)", last_file)
+            if _is_summarize:
+                log.info("[INTENT] context-followup -> SUMMARY (eff_last_file=%r)", _eff_last_file)
                 return "SUMMARY"
-            if last_intent in {"RETRIEVAL", "SUMMARY", "GENERAL"} \
-                    and _FOLLOWUP_PATTERN.search(text):
-                log.info("[INTENT] context-followup -> RETRIEVAL (last_file=%r)", last_file)
+            if last_intent in {"RETRIEVAL", "SUMMARY", "GENERAL", "FILE_SEARCH", "FILE_SELECT"} \
+                    and _has_anaphoric:
+                log.info("[INTENT] context-followup -> RETRIEVAL (eff_last_file=%r)", _eff_last_file)
                 return "RETRIEVAL"
 
         # 0.1. Email context — anaphoric informational follow-up
@@ -153,7 +199,11 @@ class IntentClassifier:
         _email_ctx_active = last_intent in {
             "EMAIL_SEARCH", "EMAIL_SUMMARIZE", "EMAIL_QUERY", "EMAIL_SUMMARY", "EMAIL_REPLY"
         }
-        if not _email_ctx_active:
+        # Memory fallback: only activate email context when the query carries an
+        # explicit email keyword OR an anaphoric+semantic signal. This prevents
+        # stale email data in memory from bleeding into unrelated queries like
+        # "find my resume" or "which model is using in my project".
+        if not _email_ctx_active and self._EMAIL_RELEVANT_SIGNAL_RE.search(text):
             try:
                 from memory.conversation_memory import conversation_memory
                 _email_ctx_active = bool(conversation_memory.get_last_email())
@@ -172,6 +222,15 @@ class IntentClassifier:
             log.info("[INTENT] draft-modify-followup -> EMAIL_REPLY | %r", text[:60])
             return "EMAIL_REPLY"
 
+        # 0.3. File-index lookup — fires when a registered filename appears in the
+        # query.  Enables "summarize AiAgent.txt" / "open spring.txt" WITHOUT a
+        # folder path.  Runs before the email overrides so a file query can never
+        # be accidentally misdirected into the email flow.
+        _fi_intent = self._file_index_lookup(text)
+        if _fi_intent:
+            log.info("[INTENT] file-index-lookup -> %s | %r", _fi_intent, text[:60])
+            return _fi_intent
+
         # 0.4. Pre-classification guard — escapes email context override for
         # high-confidence non-email signals (e.g., reminder commands while
         # last_intent is EMAIL_REPLY or EMAIL_SEARCH).
@@ -179,6 +238,20 @@ class IntentClassifier:
         if pre:
             log.info("[INTENT] pre-classify-guard -> %s | %r", pre, text[:60])
             return pre
+
+        # 0.5a. Strong document-search pre-emption — fires BEFORE the email
+        # context override so "find my resume" can never be misrouted as email.
+        doc_pre = self.detect_document_intent(text)
+        if doc_pre:
+            log.info("[INTENT] strong-doc-rule -> %s | %r", doc_pre, text[:60])
+            return doc_pre
+
+        # 0.5b. Strong general-query pre-emption — for unambiguous system /
+        # knowledge queries like "which model is using in my project".
+        gen_pre = self.detect_general_intent(text)
+        if gen_pre:
+            log.info("[INTENT] strong-general-rule -> %s | %r", gen_pre, text[:60])
+            return gen_pre
 
         # 0.5. Email context override — memory-aware, fires before regex/LLM.
         # When an email is stored in memory and the input carries any reply signal
@@ -200,33 +273,22 @@ class IntentClassifier:
             log.info("[INTENT] guardrail -> %s | %r", guardrail, text[:60])
             return guardrail
 
-        # 3. LLM classification — strict JSON only
-        llm_result = self._llm_classify(text, history, memory_facts)
-        if llm_result and self._sanity_check(llm_result, text):
-            log.info("[INTENT] LLM -> %s | %r", llm_result, text[:60])
-            return llm_result
-        if llm_result:
-            log.warning(
-                "[INTENT] LLM result %r rejected by sanity check for %r",
-                llm_result, text[:60],
-            )
+        # 3. LLM classification — DISABLED
+        # PART 2: REMOVE LLM-BASED INTENT CLASSIFICATION
+        llm_result = None
+        confidence = 0
+        
+        # --- LIGHT SANITY CHECK ---
+        ui_lower = text.lower()
+        file_signals = ["find", "document", "file", "resume", "feedback", "pdf", "report", "csv", "internship", "data", "search", "retrieve", "fetch", "locate"]
+        has_file_signal = any(s in ui_lower for s in file_signals)
 
-        # 4. Heuristic fallback (when LLM fails or is unavailable)
-        heuristic = self._heuristic_fallback(text, last_intent)
-        if heuristic:
-            log.info("[INTENT] heuristic -> %s | %r (LLM failed)", heuristic, text[:60])
-            return heuristic
+        if has_file_signal:
+            log.info("[INTENT-FIX] Signal detected -> FILE_SEARCH | %r", text[:60])
+            return "FILE_SEARCH"
 
-        # 5. Legacy planner-agent regex
-        try:
-            from agents.core.planner_agent import decide_intent
-            result = decide_intent(text)
-            log.info("[INTENT] planner -> %s | %r", result, text[:60])
-            return result
-        except Exception as exc:
-            log.warning("[INTENT] planner fallback failed: %s", exc)
-
-        log.info("[INTENT] default -> GENERAL | %r", text[:60])
+        # 4. Final fallback — return GENERAL if LLM failed or returned invalid intent
+        log.info("[INTENT] LLM failed or invalid intent, defaulting to GENERAL | %r", text[:60])
         return "GENERAL"
 
     # ── pre-classification guard ──────────────────────────────────────────
@@ -313,12 +375,164 @@ class IntentClassifier:
     # Explicit document/file reference — prevents email context from absorbing
     # queries that are clearly about a file, not an email.
     _DOC_CTX_EXCL_RE = re.compile(
-        r"\b(files?|documents?|docs?|folder|directory)\b"
+        r"\b(files?|documents?|docs?|folder|directory"
+        r"|resume|curriculum\s+vitae|\bcv\b|report|invoice|contract"
+        r"|proposal|portfolio|spreadsheet|presentation|slides?)\b"
         r"|\.(?:txt|pdf|docx?|pptx?|md|csv|xlsx?|json|log)\b",
         re.IGNORECASE,
     )
     _EMAIL_NOUN_RE = re.compile(
         r"\b(email|mail|inbox|message)\b",
+        re.IGNORECASE,
+    )
+
+    # ── Strong pre-LLM detection patterns (Steps 0.5a / 0.5b) ────────────────
+    # High-confidence document/file-search signals — fires BEFORE LLM and
+    # BEFORE email-context override so document queries can never be absorbed.
+    _STRONG_DOC_RE = re.compile(
+        r"(?:"
+        # Action verb + document-like noun (not an email noun)
+        r"\b(?:find|open|locate|search\s+for|look\s+for|show\s+me|get\s+me"
+        r"|retrieve|fetch|access|load|pull\s+up)\b"
+        r".{0,50}"
+        r"\b(?:resume|cv|curriculum\s+vitae|report|invoice|contract|proposal"
+        r"|notes?|manual|guide|handbook|slides?|presentation|spreadsheet"
+        r"|budget|plan|schedule|log|portfolio|brochure|certificate"
+        r"|deed|receipt|letter)\b"
+        r"|"
+        # Explicit file extension in query
+        r"\b[\w][\w\s\-]*\.(?:pdf|docx?|pptx?|txt|md|csv|xlsx?|json|log)\b"
+        r"|"
+        # Action verb + generic file/document noun
+        r"\b(?:find|open|locate|show|get|read|access|load|fetch)\b"
+        r".{0,30}\b(?:file|document|doc|folder|directory)\b"
+        r")",
+        re.IGNORECASE,
+    )
+
+    # Discovery-specific verbs — ONLY match when the intent is to FIND/LOCATE a file
+    # (not to read its content).  Returns FILE_SEARCH, not RETRIEVAL.
+    # NOTE: "list" and "show" are intentionally excluded here; they are handled
+    # by _FILE_LIST_RE below which returns FILE_LIST instead.
+    _FILE_DISCOVERY_RE = re.compile(
+        r"(?:"
+        # Pattern A: discovery verb + file/document noun (original + bare "show")
+        r"\b(?:find|locate|search\s+(?:for)?|look\s+for|open|get\s+me|show(?:\s+me)?)\b"
+        r".{0,60}"
+        r"\b(?:resume|cv|curriculum\s+vitae|report|invoice|contract|proposal"
+        r"|notes?|manual|guide|handbook|slides?|presentation|spreadsheet"
+        r"|budget|plan|log|portfolio|brochure|certificate"
+        r"|deed|receipt|letter|files?|documents?|docs?)\b"
+        r"|"
+        # Pattern B: "any doc(s)/document(s) about/related to/on ..."
+        r"\bany\s+(?:docs?|documents?|files?)\b.{0,40}"
+        r"\b(?:about|on|related\s+to|for|covering|regarding)\b"
+        r"|"
+        # Pattern C: "documents/docs related to / about / for ..."
+        r"\b(?:docs?|documents?|files?)\s+(?:related\s+to|about|for|on|regarding)\b"
+        r"|"
+        # Pattern D: "documentation for / about ..."
+        r"\bdocumentation\s+(?:for|about|on|related\s+to)\b"
+        r"|"
+        # Pattern E: bare search query — "find ... related to" or "search ... about"
+        r"\b(?:find|search|look\s+for|locate)\b.{0,40}"
+        r"\b(?:related\s+to|about|on\s+the\s+topic\s+of|covering|regarding)\b"
+        r")",
+        re.IGNORECASE,
+    )
+
+    # Discovery verbs without a specific noun — matches filesystem listing requests.
+    # Returns FILE_LIST (triggers metadata listing, not a keyword search).
+    _FILE_LIST_RE = re.compile(
+        # Only allow filler words (me/all/my/the/available) between verb and noun —
+        # topic words in between (e.g. "show app flow document") must NOT match here.
+        r"\b(?:list|show|display)\s+(?:me\s+)?(?:all\s+)?(?:my\s+)?(?:the\s+)?(?:available\s+)?(?:files?|documents?)\b"
+        r"|\b(?:files?|documents?)\b.{0,30}\b(?:available|indexed|stored|uploaded)\b",
+        re.IGNORECASE,
+    )
+
+    # Discovery verbs for bare extension queries ("locate report.pdf", "open notes.txt")
+    _FILE_DISC_VERB_RE = re.compile(
+        r"\b(?:find|locate|search\s+for|look\s+for|open|get\s+me|show\s+me)\b",
+        re.IGNORECASE,
+    )
+
+    # Content question aimed at a specific named document:
+    #   "what does the report say about Q4"
+    #   "how does the manual explain installation"
+    # Returns RETRIEVAL (go to RAG) rather than falling through to LLM.
+    _DOC_SPECIFIC_NOUNS = (
+        r"(?:report|resume|cv|invoice|contract|proposal|notes?|manual|guide"
+        r"|handbook|slides?|presentation|spreadsheet|budget|plan|schedule|log"
+        r"|portfolio|brochure|certificate|deed|receipt|letter|document|doc)"
+    )
+    _CONTENT_ON_DOC_RE = re.compile(
+        # Pattern A: question word + doc noun + content verb (verb comes after noun)
+        # e.g. "what does the report say about Q4"
+        r"\b(?:what|how|when|where|why|who|which)\b"
+        r".{0,40}\b" + _DOC_SPECIFIC_NOUNS + r"\b"
+        r".{0,40}\b(?:says?|tells?|contains?|discuss(?:es)?|mentions?"
+        r"|means?|explains?|shows?|about|cover|address)\b"
+        r"|"
+        # Pattern B: what/how + content noun + preposition + doc noun (verb before noun)
+        # e.g. "what information is in the manual", "how setup works in the guide"
+        r"\b(?:what|how)\b.{0,30}\b(?:information|info|details?|content|data|steps?|instruction)\b"
+        r".{0,30}\b(?:in|from|inside|within|about)\b.{0,20}\b" + _DOC_SPECIFIC_NOUNS + r"\b",
+        re.IGNORECASE,
+    )
+
+    # High-confidence general/system/knowledge signals — fires BEFORE LLM.
+    # "which model is using in my project", "what version of python", etc.
+    _STRONG_GENERAL_RE = re.compile(
+        r"\b(?:which|what)\b.{0,25}"
+        r"\b(?:model|version|framework|library|tool|setting|config"
+        r"|configuration|parameter|dependency|package|module|algorithm)\b"
+        r".{0,40}"
+        r"\b(?:using|used|set|installed|configured|in|for|my|this|project"
+        r"|code|app|system|codebase|repo|repository)\b",
+        re.IGNORECASE,
+    )
+
+    # Broad general-knowledge question patterns — "what is X", "explain X",
+    # "how does X work", "tell me about X".  Fires in classify_query() and
+    # detect_general_intent() when NO file/document/email signal is also present.
+    _GENERAL_KNOWLEDGE_RE = re.compile(
+        r"^(?:"
+        r"what\s+(?:is|are|was|were)\s+(?!my\s+)"  # "what is AI" (not "what is my ...")
+        r"|explain\s+"
+        r"|define\s+"
+        r"|how\s+(?:does|do|can|would|should|is|are)\s+"
+        r"|why\s+(?:is|are|does|do|was|were)\s+"
+        r"|tell\s+me\s+about\s+"
+        r"|what\s+do\s+you\s+(?:know|think)\s+(?:about\s+)?"
+        r"|describe\s+(?!(?:the\s+)?(?:file|document|doc)\b)"
+        r")",
+        re.IGNORECASE,
+    )
+
+    # Explicit file/doc/personal-data reference — prevents GENERAL_KNOWLEDGE on
+    # queries that mention personal files: "my resume", "in the document", etc.
+    _FILE_PERSONAL_REF_RE = re.compile(
+        r"\b(?:in\s+(?:this|the|my|that)\s+(?:file|doc(?:ument)?|report|pdf)"
+        r"|from\s+(?:this|the|my)\s+(?:file|doc(?:ument)?)"
+        r"|my\s+(?:cgpa|grade|marks?|score|gpa|salary|resume|cv|report)\b)",
+        re.IGNORECASE,
+    )
+
+    # Email keywords required for EMAIL_* intents to be considered valid.
+    _EMAIL_CONTENT_KW_RE = re.compile(
+        r"\b(?:email|mail|inbox|reply|send|message|draft|compose"
+        r"|subject|sender|recipient|attachment)\b",
+        re.IGNORECASE,
+    )
+
+    # Minimal signal required before the email-context memory fallback fires.
+    # Prevents stale email in memory from bleeding into unrelated queries.
+    _EMAIL_RELEVANT_SIGNAL_RE = re.compile(
+        r"\b(?:email|mail|inbox)"
+        r"|\b(?:summarize|summarise|explain|describe|overview|gist)\b"
+        r"|\b(?:it|this|that|above)\b.{0,15}\b(?:about|contain|say|mean)"
+        r"|\b(?:reply|respond|send\s+it|compose|draft)\b",
         re.IGNORECASE,
     )
 
@@ -359,6 +573,220 @@ class IntentClassifier:
         """
         if self._REMINDER_FASTPATH_RE.search(text):
             return "REMINDER_SET"
+        return None
+
+    # ── strong pre-LLM rule detectors (steps 0.5a / 0.5b) ─────────────────
+
+    def detect_document_intent(self, text: str) -> Optional[str]:
+        """Return FILE_LIST, FILE_SEARCH, RETRIEVAL, or SUMMARY for document queries.
+
+        Priority order:
+        1. FILE_LIST    — "list/show (all) (my) files" — no specific file named.
+        2. FILE_SEARCH  — discovery verb (find/locate/open) + file noun or extension.
+           No RAG. The orchestrator searches the metadata index.
+        3. SUMMARY      — summarize verb + file-extension or document noun.
+        4. RETRIEVAL    — other content queries matching _STRONG_DOC_RE.
+
+        Fires BEFORE the LLM and BEFORE the email-context override.
+        Returns None when email keywords are also present.
+        """
+        if self._EMAIL_NOUN_RE.search(text):
+            return None
+
+        # Guard: summarize/explain + anaphoric reference ("above", "that", "this")
+        # should route to SUMMARY, NOT FILE_SEARCH — even if _FILE_DISCOVERY_RE
+        # or _FILE_LIST_RE would match the word "document"/"file".
+        _has_summarize = bool(re.search(
+            r"\b(?:summ(?:ar|er)i[szwe]\w*|summary|explain|overview|gist|describe)\b",
+            text, re.IGNORECASE,
+        ))
+        _has_anaphoric_ref = bool(re.search(
+            r"\b(?:above|that|this|previous|last|same|it)\b",
+            text, re.IGNORECASE,
+        ))
+        if _has_summarize and _has_anaphoric_ref:
+            return "SUMMARY"
+
+        # 1. Generic file listing request
+        if self._FILE_LIST_RE.search(text):
+            return "FILE_LIST"
+        # 2. Discovery query
+        if self._FILE_DISCOVERY_RE.search(text):
+            return "FILE_SEARCH"
+        # 2b. Discovery verb + explicit file extension (e.g. "locate report.pdf")
+        if self._STRONG_DOC_RE.search(text) and self._FILE_DISC_VERB_RE.search(text):
+            if re.search(r"\bsumm(?:ar|er)i[szwe]\w*\b", text, re.IGNORECASE):
+                return "SUMMARY"
+            return "FILE_SEARCH"
+        # 3. Content question about a specific named document
+        #    e.g. "what does the report say about Q4"
+        if self._CONTENT_ON_DOC_RE.search(text):
+            return "RETRIEVAL"
+        # 4. Summarize/retrieve a document
+        if self._STRONG_DOC_RE.search(text):
+            if re.search(r"\bsumm(?:ar|er)i[szwe]\w*\b", text, re.IGNORECASE):
+                return "SUMMARY"
+            return "RETRIEVAL"
+        return None
+
+    def detect_general_intent(self, text: str) -> Optional[str]:
+        """Return GENERAL when *text* is a clear system/knowledge/project query.
+
+        Covers:
+        - System/config queries: "which model is in my project", "what Python version"
+        - General knowledge questions: "what is AI", "explain machine learning",
+          "how does TCP work", "tell me about neural networks"
+
+        Returns None when email keywords are present or a file/doc signal exists.
+        """
+        if self._EMAIL_NOUN_RE.search(text):
+            return None
+        if self._STRONG_GENERAL_RE.search(text):
+            return "GENERAL"
+        # Broad general-knowledge patterns ("what is X", "explain X", …)
+        # Only fire when there is NO file/document/personal-data reference.
+        if self._GENERAL_KNOWLEDGE_RE.match(text):
+            if not self._FILE_PERSONAL_REF_RE.search(text):
+                # Guard against document nouns: "what does the report say",
+                # "explain my resume" etc. — these already caught by detect_document_intent.
+                if not self.detect_document_intent(text):
+                    return "GENERAL"
+        return None
+
+    def classify_query(self, query: str) -> str:
+        """3-layer hybrid query classifier — GENERAL_KNOWLEDGE / FILE_SEARCH / FILE_QA / PIPELINE.
+
+        Designed as a fast pre-emption gate called by the orchestrator BEFORE
+        the full intent pipeline.  Returns one of four labels:
+
+        - "GENERAL_KNOWLEDGE" → route directly to pure LLM; skip all file ops.
+        - "FILE_SEARCH"        → route to metadata index search; no RAG.
+        - "FILE_QA"            → route to file content Q&A / RAG.
+        - "PIPELINE"           → let the main intent pipeline decide (default).
+
+        Examples
+        --------
+        classify_query("What is artificial intelligence?") → "GENERAL_KNOWLEDGE"
+        classify_query("Find my resume")                   → "FILE_SEARCH"
+        classify_query("What is my CGPA in resume?")       → "FILE_QA"
+        classify_query("Explain machine learning")         → "GENERAL_KNOWLEDGE"
+        classify_query("Remind me at 5 PM")                → "PIPELINE"
+        classify_query("Reply to the email")               → "PIPELINE"
+        """
+        q = query.lower().strip()
+
+        # Guard: domain-specific intents handled by the main pipeline
+        if re.search(
+            r"\b(?:email|mail|inbox|remind(?:er)?|alarm|alert"
+            r"|audio|transcript|folder|directory)\b",
+            q,
+        ):
+            return "PIPELINE"
+
+        # Guard: file extension present → file operation
+        if re.search(
+            r"\b\w[\w\s\-]+\.(?:pdf|docx?|xlsx?|pptx?|txt|csv|md|json|log|py|js|ts)\b",
+            q,
+        ):
+            return "FILE_QA"
+
+        # Layer 1 — FILE_SEARCH / FILE_LIST detection (checked BEFORE personal-ref guard
+        # so "find my resume" → FILE_SEARCH, not FILE_QA)
+        doc_intent = self.detect_document_intent(q)
+        if doc_intent in ("FILE_SEARCH", "FILE_LIST"):
+            return "FILE_SEARCH"
+
+        # Guard: personal file-content queries → FILE_QA, not GENERAL
+        # Runs after FILE_SEARCH so discovery verbs win ("find my resume" → FILE_SEARCH).
+        if self._FILE_PERSONAL_REF_RE.search(q):
+            return "FILE_QA"
+
+        # Layer 2 — FILE_QA / RETRIEVAL / SUMMARY detection
+        if doc_intent in ("RETRIEVAL", "SUMMARY"):
+            return "FILE_QA"
+
+        # Layer 3 — clear general-knowledge patterns
+        if self._GENERAL_KNOWLEDGE_RE.match(q):
+            return "GENERAL_KNOWLEDGE"
+
+        return "PIPELINE"
+
+    def validate_email_intent(self, text: str, intent: str) -> str:
+        """Downgrade EMAIL_* intent returned by the LLM when the query lacks email keywords.
+
+        Post-LLM guard that catches cases where the LLM is misled by email-heavy
+        conversation history and classifies an unrelated query (e.g. "find my resume")
+        as EMAIL_SUMMARIZE or EMAIL_QUERY.
+
+        Rules:
+        - EMAIL_SEND / EMAIL_REPLY: allow with any email-adjacent verb (lenient).
+        - Other EMAIL_* (SUMMARIZE, QUERY, SEARCH, SUMMARY): require at least one
+          email keyword; if absent, downgrade to RETRIEVAL (document signal) or GENERAL.
+        """
+        if not intent.startswith("EMAIL_"):
+            return intent
+        # For send/reply, allow loose signals to avoid breaking legit email flow.
+        if intent in {"EMAIL_SEND", "EMAIL_REPLY"}:
+            if re.search(
+                r"\b(?:reply|respond|send|email|mail|draft|compose|go\s+ahead)\b",
+                text, re.IGNORECASE,
+            ):
+                return intent
+            return "GENERAL"
+        # For informational/search email intents, require explicit email keyword.
+        if not self._EMAIL_CONTENT_KW_RE.search(text):
+            log.warning(
+                "[INTENT] validate_email_intent: %s -> no email keywords -> override | %r",
+                intent, text[:60],
+            )
+            if self._STRONG_DOC_RE.search(text):
+                return "RETRIEVAL"
+            return "GENERAL"
+        return intent
+
+    # ── file-index lookup (step 0.3) ────────────────────────────────────────
+    # Determine doc intent when a known filename is mentioned in the query.
+
+    # Verbs that indicate the user wants a summary / explanation.
+    _FI_SUMMARIZE_RE = re.compile(
+        r"\b(?:summ(?:ar|er)i[szwe]\w*|explain|describe|overview|gist"
+        r"|what\s+(?:is|are|does)\s+(?:it|this|that|the|in)\b)\b",
+        re.IGNORECASE,
+    )
+    # Verbs that indicate the user wants to read / open / retrieve.
+    _FI_READ_RE = re.compile(
+        r"\b(?:open|read|show|display|view|get|fetch|access|print|load)\b",
+        re.IGNORECASE,
+    )
+
+    def _file_index_lookup(self, text: str) -> Optional[str]:
+        """Return an intent when a registered filename appears in *text*.
+
+        Checks the session file index in ``ConversationMemory``.  If a known
+        filename is found in the query text the intent is determined by the
+        action verb present:
+        - summarize / explain / describe → SUMMARY
+        - open / read / show / view … → RETRIEVAL
+        - anything else (default) → SUMMARY
+
+        Returns ``None`` when the file index is empty or no filename matches.
+        """
+        try:
+            from memory.conversation_memory import conversation_memory
+            file_index = conversation_memory.get_file_index()
+            if not file_index:
+                return None
+            text_lower = text.lower()
+            for name in file_index:
+                if name in text_lower:
+                    if self._FI_SUMMARIZE_RE.search(text):
+                        return "SUMMARY"
+                    if self._FI_READ_RE.search(text):
+                        return "RETRIEVAL"
+                    # Default when only the filename is present without a verb
+                    return "SUMMARY"
+        except Exception as exc:
+            log.debug("[INTENT] file-index-lookup failed: %s", exc)
         return None
 
     # ── email context override (memory-aware) ─────────────────────────────
@@ -667,7 +1095,15 @@ class IntentClassifier:
                 system += f"\n\nUser context:\n{fact_lines}"
 
             messages: list[dict] = [{"role": "system", "content": system}]
-            if history:
+            # Only inject history when the query explicitly references prior context
+            # (anaphoric pronouns or follow-up signals). Sending email-heavy history
+            # with unrelated queries was the primary cause of EMAIL_* misclassification.
+            _needs_history = bool(re.search(
+                r"\b(?:it|this|that|above|previous|last|the\s+email"
+                r"|the\s+file|those|that\s+one|reply\s+to\s+(?:that|it))\b",
+                text, re.IGNORECASE,
+            ))
+            if history and _needs_history:
                 messages.extend(history[-3:])
             messages.append({"role": "user", "content": text})
 
@@ -676,6 +1112,7 @@ class IntentClassifier:
                 len(history or []), text[:60],
             )
 
+            print(f"[LLM] Using model: {MODEL}")
             resp = ollama.chat(
                 model=self._model(),
                 messages=messages,
@@ -685,13 +1122,7 @@ class IntentClassifier:
             raw = (resp.get("message", {}).get("content") or "").strip()
             log.info("[INTENT_CLASSIFIER] LLM raw: %s", raw[:150])
 
-            result = self._parse_json_intent(raw)
-            if result:
-                log.info("[INTENT_CLASSIFIER] parsed -> %s", result)
-            else:
-                log.warning(
-                    "[INTENT_CLASSIFIER] REJECTED non-JSON response: %s", raw[:100]
-                )
+            result = self._parse_json_intent_with_confidence(raw)
             return result
 
         except Exception as exc:
@@ -736,8 +1167,11 @@ class IntentClassifier:
                         intent, data.get("confidence", 0.0),
                     )
                     return intent
-                log.warning("[INTENT_CLASSIFIER] invalid intent value: %r", intent)
-                return None
+                # FIX: An unknown intent from the LLM is not an error. Map it to GENERAL
+                # so it can be handled by the default AI handler instead of being
+                # rejected, which causes incorrect fallback behavior.
+                log.warning("[INTENT_CLASSIFIER] Unknown intent %r mapped to GENERAL", intent)
+                return "GENERAL"
             except _json.JSONDecodeError:
                 pass
 
@@ -748,8 +1182,9 @@ class IntentClassifier:
                 intent = str(data["intent"]).strip().upper()
                 if intent in _VALID_INTENTS:
                     return intent
-                log.warning("[INTENT_CLASSIFIER] invalid intent value: %r", intent)
-                return None
+                # FIX: Map unknown intents to GENERAL.
+                log.warning("[INTENT_CLASSIFIER] Unknown intent %r mapped to GENERAL", intent)
+                return "GENERAL"
         except _json.JSONDecodeError:
             pass
 
@@ -765,7 +1200,7 @@ class IntentClassifier:
     def _sanity_check(intent: str, text: str) -> bool:
         """Return False when the LLM result is obviously wrong.
 
-        The small model (llama3.2:1b) sometimes returns GREETING or CHAT
+        The small model (llama3) sometimes returns GREETING or CHAT
         for arbitrary questions.  Reject those cases so the heuristic
         fallback can produce a better answer.
         """
@@ -781,6 +1216,12 @@ class IntentClassifier:
         # CHAT must be short social chitchat
         if intent == "CHAT" and len(t) > 40:
             if re.search(r"\b(email|remind|send|file|document|audio|search|find)\b", t):
+                return False
+
+        # EMAIL_* informational/search intents require at least one email keyword.
+        # Catches LLM misclassification when history is email-heavy.
+        if intent in {"EMAIL_SUMMARIZE", "EMAIL_QUERY", "EMAIL_SUMMARY", "EMAIL_SEARCH"}:
+            if not re.search(r"\b(email|mail|inbox|message)\b", t):
                 return False
 
         return True
@@ -962,7 +1403,54 @@ class IntentClassifier:
         )
 
         # ----------------------------------------------------------------
-        # Explicit filename with extension → SUMMARY or RETRIEVAL.
+        # FILE_LIST — "list my files", "show all files", "what files do I have"
+        # Fires before DOCUMENT_LIST so these go to metadata search, not RAG.
+        # ----------------------------------------------------------------
+        _FILE_LIST_VERBS = r"(list|show|display|what|which)"
+        _FILE_LIST_NOUNS = r"(files?|documents?|docs?)"
+        if not _HAS_EMAIL_KW and (
+            _re.search(
+                r"\b" + _FILE_LIST_VERBS + r"\b.{0,30}\ball\b.{0,20}\b" + _FILE_LIST_NOUNS + r"\b",
+                t,
+            )
+            or _re.search(
+                r"\b(list|show)\b.{0,20}\b(?:my\s+)?" + _FILE_LIST_NOUNS + r"\b",
+                t,
+            )
+            or _re.search(
+                r"\b" + _FILE_LIST_NOUNS + r"\b.{0,30}\b(available|indexed|stored|uploaded)\b",
+                t,
+            )
+        ):
+            return "FILE_LIST"
+
+        # ----------------------------------------------------------------
+        # FILE_SEARCH — "find my resume", "locate the budget report", "open X"
+        # Uses discovery verbs only (no content verbs like summarize/explain).
+        # Returns FILE_SEARCH → orchestrator handles via metadata index (no RAG).
+        # ----------------------------------------------------------------
+        _FILE_DISC_VERBS = (
+            r"(find|locate|search\s+for|look\s+for|open|get\s+me|show\s+me)"
+        )
+        _FILE_DOC_NOUNS = (
+            r"(resume|cv|curriculum\s+vitae|report|invoice|contract|proposal"
+            r"|notes?|manual|guide|handbook|slides?|presentation|spreadsheet"
+            r"|budget|plan|schedule|log|portfolio|brochure|certificate"
+            r"|deed|receipt|letter|file|document|doc)"
+        )
+        if not _HAS_EMAIL_KW and _re.search(
+            r"\b" + _FILE_DISC_VERBS + r"\b.{0,60}\b" + _FILE_DOC_NOUNS + r"\b",
+            t,
+        ):
+            # Exception: if query also has content verbs it's a content query
+            if not _re.search(
+                r"\b(summarize|summarise|what\s+does|explain|describe|tell\s+me\s+about)\b",
+                t,
+            ):
+                return "FILE_SEARCH"
+
+        # ----------------------------------------------------------------
+        # Explicit filename with extension → FILE_SEARCH (discovery) or SUMMARY.
         # Fires BEFORE the DOCUMENT_LIST block so inputs like "find AiAgent.txt"
         # and "summarizw spring.txt" never fall through to the LLM.
         # ----------------------------------------------------------------
@@ -972,9 +1460,17 @@ class IntentClassifier:
         if not _HAS_EMAIL_KW and _re.search(_DOC_EXT_RE, t, _re.IGNORECASE):
             if _re.search(r"\bsumm(?:ar|er)i[szwe]\w*\b", t, _re.IGNORECASE):
                 return "SUMMARY"
+            # Discovery verb + filename → FILE_SEARCH
+            if _re.search(r"\b" + _FILE_DISC_VERBS + r"\b", t):
+                return "FILE_SEARCH"
             return "RETRIEVAL"
 
-        if not _HAS_EMAIL_KW and (
+        # Guard: content-query verbs (says/tells/contains/…) after a doc noun mean
+        # the user wants the *contents* of a known document, not a listing.
+        _CONTENT_Q_RE = (
+            r"\b(?:says?|tells?|contains?|discuss(?:es)?|mentions?|means?|explains?|describes?)\b"
+        )
+        if not _HAS_EMAIL_KW and not _re.search(_CONTENT_Q_RE, t) and (
             _re.search(
                 r"\b" + _DOC_VERB + r"\b.{0,50}\b" + _DOC_NOUN + r"\b",
                 t,
@@ -1088,10 +1584,208 @@ class IntentClassifier:
             ):
                 return "GENERAL"
 
+        # ── MEMORY_RECALL ────────────────────────────────────────────────────
+        # "what is my ...", "do you know my ...", "what did I tell you about my ..."
+        # "what do you remember about ...", "recall my ..."
+        # Checked BEFORE MEMORY_STORE so "what is my favorite X" → RECALL not STORE.
+        if _re.search(
+            r"\b(what\s+(?:is|are|was|were)\s+my\b"
+            r"|what'?s\s+my\b"
+            r"|do\s+you\s+(?:know|remember)\b"
+            r"|what\s+do\s+you\s+(?:know|remember)\b"
+            r"|recall\s+(?:my|what)\b"
+            r"|(?:my\s+)?(?:name|language|preference|favorite|location|role)\??$)",
+            t,
+        ) and not _re.search(
+            r"\b(email|mail|inbox|remind(?:er)?|file|document)\b", t
+        ):
+            return "MEMORY_RECALL"
+
+        # ── MEMORY_STORE ─────────────────────────────────────────────────────
+        # "remember that ...", "store that ...", "save that my X is Y",
+        # "note that ...", "keep in mind that ...", "my favorite X is Y"
+        # Guard: explicit question form ("what is my X") is already caught above.
+        if _re.search(
+            r"\b(remember\s+(?:that\s+)?|store\s+(?:that\s+)?|save\s+(?:that\s+)?"
+            r"|note\s+(?:that\s+)?|keep\s+in\s+mind\s+(?:that\s+)?"
+            r"|my\s+(?:favorite|favourite|preferred|fav)\b"
+            r"|i\s+(?:prefer|like|love|use|am|work)\b)",
+            t,
+        ) and not _re.search(
+            r"^(?:what|who|when|where|why|how|which|do\s+you)\b", t
+        ) and not _re.search(
+            r"\b(email|mail|inbox|remind(?:er)?|alarm)\b", t
+        ):
+            return "MEMORY_STORE"
+
+        # ── INVALID_INPUT ────────────────────────────────────────────────────
+        # Pure gibberish: no real words, mostly non-alpha, or <3 chars
+        _stripped = _re.sub(r"[^a-z]", "", t)
+        if len(_stripped) < 3:
+            return "INVALID_INPUT"
+        # Single token (no spaces) — check for keyboard-mash characteristics
+        if " " not in t and len(t) >= 4:
+            _vowels = len(_re.findall(r"[aeiou]", t))
+            _consonants = len(_re.findall(r"[bcdfghjklmnpqrstvwxyz]", t))
+            total = _vowels + _consonants
+            # Keyboard mash: vowel ratio < 15% in a long-ish token (e.g. "asdfghjkl")
+            if total >= 5 and _vowels / total < 0.15:
+                return "INVALID_INPUT"
+            # Also catch pure consonant strings
+            if _vowels == 0:
+                return "INVALID_INPUT"
+
+        # ── Strong GENERAL escape ─────────────────────────────────────────────
+        # Clearly knowledge / definition / explanation queries with no file or email
+        # signal: "explain what X is", "what is deep learning", "how does X work"
+        _has_file_signal = bool(_re.search(
+            r"\b(file|document|doc|folder|pdf|resume|report|invoice|contract"
+            r"|open|find|locate|read|load)\b", t
+        ))
+        _has_email_signal = bool(_re.search(
+            r"\b(email|mail|inbox|reply|send|draft|compose)\b", t
+        ))
+        if not _has_file_signal and not _has_email_signal:
+            # WH-question + concept → clear general knowledge query
+            if _re.search(
+                r"^(what|explain|how|why|when|who|define|describe|tell\s+me\s+about)\b"
+                r".{10,}",
+                t,
+            ) and _re.search(
+                r"\b(is|are|was|were|does|do|did|it|mean|means|works?|explain|"
+                r"concept|idea|theory|algorithm|method|approach|process|system)\b",
+                t,
+            ):
+                return "GENERAL"
         return None
 
+    @staticmethod
+    def _parse_json_intent_with_confidence(raw: str) -> tuple[Optional[str], int]:
+        """Parse strict JSON intent and confidence from LLM response.
+        
+        Returns (intent, confidence).
+        """
+        import json as _json
+        import re
+        if not raw:
+            return None, 0
+            
+        try:
+            # Step 1: strip markdown code fences
+            cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().strip("`").strip()
+            
+            # Step 2: extract innermost { ... } object if it exists
+            match = re.search(r"(\{.*\})", cleaned, re.DOTALL)
+            if match:
+                data = _json.loads(match.group(1))
+                intent = data.get("intent")
+                conf = data.get("confidence", 0)
+                # Handle 0.95 vs 95
+                if isinstance(conf, float) and conf <= 1.0:
+                    conf = int(conf * 100)
+                elif isinstance(conf, (int, float)):
+                    conf = int(conf)
+                else:
+                    conf = 0
+                return intent, conf
+        except Exception:
+            pass
+        return None, 0
 
 # ---------------------------------------------------------------------------
 # Global singleton
 # ---------------------------------------------------------------------------
 intent_classifier = IntentClassifier()
+
+
+# ---------------------------------------------------------------------------
+# Module-level detect_intent helper (hard-decision, no LLM)
+# ---------------------------------------------------------------------------
+
+def detect_intent(query: str) -> str:
+    """Deterministic intent detection — FILE_SEARCH, FILE_QA, or GENERAL.
+
+    Runs pre-LLM rules only.  Designed as a hard override gate: call this
+    BEFORE any selected-file follow-up logic so that explicit search
+    requests always escape to FILE_SEARCH regardless of session state.
+
+    Returns
+    -------
+    "FILE_SEARCH"
+        Query is searching FOR a file by name, topic, or keywords.
+    "FILE_QA"
+        Query wants to read / ask about content of an already-known file.
+    "GENERAL"
+        Neither of the above — let the normal pipeline decide.
+
+    Examples
+    --------
+    detect_intent("find document related to UTV user guidance")  → "FILE_SEARCH"
+    detect_intent("any doc about UTV")                           → "FILE_SEARCH"
+    detect_intent("documentation for UTV app")                   → "FILE_SEARCH"
+    detect_intent("show app flow document")                       → "FILE_SEARCH"
+    detect_intent("what does this file say about installation")  → "FILE_QA"
+    detect_intent("explain this")                                → "FILE_QA"
+    """
+    q = query.lower().strip()
+
+    # ── Delegate to classify's strong doc-intent detector first ──────────────
+    # This covers patterns like "show app flow document" via _FILE_DISCOVERY_RE.
+    _cls_result = intent_classifier.detect_document_intent(query)
+    if _cls_result in ("FILE_SEARCH", "FILE_LIST"):
+        return "FILE_SEARCH"
+
+    # ── FILE_SEARCH signals (phrase-based, fast) ─────────────────────────────
+    _in_file_excl = re.compile(
+        r"\b(?:in\s+(?:this|that|the|my)\s+(?:file|document|doc)"
+        r"|inside\s+(?:this|that|it)"
+        r"|within\s+(?:this|that|it)"
+        r"|in\s+it\b|in\s+the\s+file\b)",
+        re.IGNORECASE,
+    )
+    _search_phrases = [
+        "find", "search", "look for", "locate",
+        "show documents", "show document", "show docs",
+        "show files", "list files", "list documents",
+        "any file", "any doc", "any document",
+        "documents related", "docs related", "files related",
+        "documentation for", "documentation about", "documentation on",
+        "document about", "doc about", "docs about",
+        "document related", "doc related",
+        "document on ", "files on ",
+        "related to", "covering",
+    ]
+    if any(phrase in q for phrase in _search_phrases):
+        if not _in_file_excl.search(query):
+            return "FILE_SEARCH"
+
+    # ── FILE_QA signals ──────────────────────────────────────────────────────
+    _qa_phrases = [
+        "what", "why", "explain", "summary", "summarize", "summarise",
+        "details", "how does", "how do", "tell me about",
+        "describe", "overview", "gist", "what does it say",
+        "what is in", "what's in",
+    ]
+    if any(phrase in q for phrase in _qa_phrases):
+        # Guard: pure general-knowledge questions must NOT become FILE_QA.
+        # "explain machine learning", "what is AI", "how does TCP work" etc.
+        # are general queries — only route to FILE_QA when a file/doc reference
+        # is also present.
+        _gk_pattern = re.match(
+            r"^(?:what\s+(?:is|are|was|were)\b|explain\s+|define\s+"
+            r"|how\s+(?:does|do|is|are)\s+|why\s+(?:is|are|does|do)\s+"
+            r"|tell\s+me\s+about\s+|describe\s+)",
+            q, re.IGNORECASE,
+        )
+        if _gk_pattern:
+            _has_file_ref = re.search(
+                r"\b(?:file|document|doc|resume|cv|report|folder"
+                r"|attachment|uploaded|in\s+(?:this|the|my)\s+(?:file|doc))\b"
+                r"|\.(?:pdf|docx?|txt|pptx?|xlsx?|csv|md|json|log)\b",
+                q, re.IGNORECASE,
+            )
+            if not _has_file_ref:
+                return "GENERAL"
+        return "FILE_QA"
+
+    return "GENERAL"

@@ -1,7 +1,7 @@
 """
 services/document_indexer_service.py
 =====================================
-Scans ``C:\\Users\\Sandeep\\OneDrive\\Documents`` (recursively) for supported
+Scans configured document folders (recursively) for supported
 file types, extracts text, splits into chunks, embeds, and persists in a
 dedicated ChromaDB store separate from the project document store.
 
@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Optional
 
 from core.logging_config import get_logger
-from configs.settings import settings, PROJECT_ROOT
+from configs.settings import settings, PROJECT_ROOT, DATA_DIR
 
 log = get_logger(__name__)
 
@@ -79,7 +79,7 @@ CHROMA_BATCH_SIZE    = 500         # max chunks per Chroma add_documents() call
 WIN_DOCS_CHUNK_SIZE    = 2_000
 WIN_DOCS_CHUNK_OVERLAP = 400
 
-_STATE_FILE: Path = PROJECT_ROOT / "data" / "win_docs_index_state.json"
+_STATE_FILE: Path = Path(DATA_DIR) / "win_docs_index_state.json"
 
 
 # ---------------------------------------------------------------------------
@@ -620,9 +620,23 @@ class DocumentIndexerService:
 
     def _read_docx(self, fpath: Path) -> str:
         try:
-            import docx  # python-docx
-            doc = docx.Document(str(fpath))
-            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            from docx import Document
+            doc = Document(str(fpath))
+            paragraphs = []
+            for p in doc.paragraphs:
+                text = p.text.strip()
+                if text:
+                    clean_text = " ".join(text.split())
+                    paragraphs.append(clean_text)
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if row_text:
+                        paragraphs.append(" | ".join([" ".join(c.split()) for c in row_text]))
+            content = "\n".join(paragraphs)
+            if content:
+                print("[FILE] Clean text extracted from DOCX")
+            return content
         except Exception as exc:
             log.warning("DOCX read error [%s]: %s", fpath.name, exc)
             return ""
@@ -702,8 +716,9 @@ class DocumentIndexerService:
             return ""
 
         try:
-            tesseract_cmd = os.environ.get("TESSERACT_CMD") or r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-            if os.path.exists(tesseract_cmd):
+            from core.runtime_paths import find_tesseract
+            tesseract_cmd = find_tesseract()
+            if tesseract_cmd:
                 pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
             img = Image.open(str(fpath)).convert("L")  # grayscale

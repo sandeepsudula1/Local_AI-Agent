@@ -131,6 +131,7 @@ def _boot() -> tuple:
         pass
 
     from pipelines.orchestrator import orchestrator
+    orchestrator.startup()
     return orchestrator, document_service, vector_store_service, settings
 
 
@@ -187,7 +188,11 @@ def _system_status() -> dict:
 
     # Reminders
     try:
-        rpath = os.path.join(_ROOT, "data", "reminders.json")
+        try:
+            from configs.settings import DATA_DIR as _ST_DATA_DIR
+            rpath = os.path.join(str(_ST_DATA_DIR), "reminders.json")
+        except Exception:
+            rpath = os.path.join(_ROOT, "data", "reminders.json")
         with open(rpath, encoding="utf-8") as f:
             reminders = json.load(f)
         active = [r for r in reminders if not r.get("fired", False)]

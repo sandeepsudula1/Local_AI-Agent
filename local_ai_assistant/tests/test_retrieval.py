@@ -117,7 +117,7 @@ def test_handle_retrieval_returns_answer_and_source(
         "how many employees in 2024",
         fake_vector_db,
         threshold=1.5,
-        model_name="llama3.2:1b",
+        model_name="gemma:7b",
     )
 
     assert isinstance(answer, str)
@@ -133,7 +133,7 @@ def test_handle_retrieval_no_vector_db(monkeypatch: pytest.MonkeyPatch, tmp_path
         "how many employees in 2024",
         None,
         threshold=1.5,
-        model_name="llama3.2:1b",
+        model_name="gemma:7b",
     )
     # Should degrade gracefully
     assert answer is None or isinstance(answer, str)
@@ -203,7 +203,7 @@ def test_rule1b_folder_filter_blocks_wrong_folder(
         f"summarize {filename}",
         fake_db,
         threshold=1.5,
-        model_name="llama3.2:1b",
+        model_name="gemma:7b",
         folder_path=allowed_folder,
     )
 
@@ -234,7 +234,7 @@ def test_rule1b_folder_filter_allows_correct_folder(
         f"summarize {filename}",
         fake_db,
         threshold=1.5,
-        model_name="llama3.2:1b",
+        model_name="gemma:7b",
         folder_path=allowed_folder,
     )
 

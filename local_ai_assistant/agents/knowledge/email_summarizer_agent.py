@@ -2,8 +2,13 @@ import os
 import json
 from agents.knowledge.email_query_agent import improved_search_emails, load_all_emails
 
-EMAIL_FILE = os.path.join("data", "emails.json")
-CACHE_FILE = os.path.join("data", "email_cache.json")
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    EMAIL_FILE = os.path.join(str(_DATA_DIR), "emails.json")
+    CACHE_FILE = os.path.join(str(_DATA_DIR), "email_cache.json")
+except Exception:
+    EMAIL_FILE = os.path.join("data", "emails.json")
+    CACHE_FILE = os.path.join("data", "email_cache.json")
 
 
 def summarize_single_email(mail, max_chars=160):

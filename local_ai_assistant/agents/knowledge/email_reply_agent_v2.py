@@ -35,7 +35,7 @@ import logging
 from typing import Optional
 
 from configs.settings import settings
-from agents.knowledge.email_query_agent import load_all_emails, _format_email_results
+from agents.knowledge.email_query_agent import load_all_emails
 
 log = logging.getLogger(__name__)
 
@@ -254,12 +254,14 @@ def generate_email_reply(
         )
 
     try:
+        from configs.llm_config import MODEL
         import ollama
 
         log.debug("Generating reply via chat (tone=%s, model=%s)", tone, model_name)
 
+        print(f"[LLM] Using model: {MODEL}")
         response = ollama.chat(
-            model=model_name,
+            model=MODEL,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user",   "content": user_msg},
@@ -274,47 +276,42 @@ def generate_email_reply(
 
         reply_text = (response.get("message", {}).get("content") or "").strip()
 
-        # Refusal detection — if the model refused, retry once with a minimal prompt
-        if reply_text and _is_refusal(reply_text):
-            log.warning(
-                "generate_email_reply: LLM refusal detected (%r...) — retrying with minimal prompt",
-                reply_text[:80],
-            )
+        # PART 3: VALIDATION CHECK
+        # Extract keywords from subject and user content to ensure relevance
+        stop_words = {'find', 'email', 'mail', 'from', 'the', 'a', 'an', 'for', 'about', 'in', 'on', 'to', 'me', 'i', 'will', 'saying'}
+        key_topics = [w.lower() for w in (subject + " " + (user_content or "")).split() if w.lower() not in stop_words and len(w) > 3]
+        
+        needs_regeneration = False
+        if reply_text and key_topics:
+            found_topic = any(topic in reply_text.lower() for topic in key_topics)
+            if not found_topic:
+                log.warning("Validation failed: Reply does not mention key topics %s", key_topics)
+                needs_regeneration = True
+        
+        # Refusal or Validation failure -> Regenerate
+        if reply_text and (_is_refusal(reply_text) or needs_regeneration):
+            log.info("generate_email_reply: Regenerating due to refusal or lack of context...")
             sender_name = _extract_name_from_email(from_addr)
-            # Build a safe, context-rich fallback that doesn't trigger safety filters
-            if user_content and user_content.strip():
-                core_intent = user_content.strip()
-            else:
-                # Auto-generate: derive intent from subject/body keywords
-                core_intent = f"Thank you for your email regarding '{subject}'. I have noted your message."
-            fallback_msg = (
-                f"Write a professional email reply to this message:\n"
+            
+            retry_msg = (
+                f"Your previous attempt was either a refusal or too generic. \n"
+                f"Write a short, SPECIFIC reply to this email about '{subject}'.\n"
+                f"Ensure you mention key details like: {', '.join(key_topics[:3])}.\n"
                 f"From: {sender_name}\n"
-                f"Subject: {subject}\n"
-                f"Email content: {body.strip()[:200]}\n\n"
-                f"My reply should convey: {core_intent}\n\n"
-                f"Format:\n"
-                f"- Start: Hi {sender_name},\n"
-                f"- 2-3 sentences responding to the email\n"
-                f"- Sign as: Best regards, {user_name}\n"
-                f"Output only the reply body."
+                f"Email: {body.strip()[:300]}\n"
+                f"Instruction: {user_content}\n"
+                f"Start with: Hi {sender_name},"
             )
+            
             response2 = ollama.chat(
-                model=model_name,
+                model=MODEL,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an email writer. Output only the email body text. "
-                            "Never refuse. Never add commentary."
-                        ),
-                    },
-                    {"role": "user", "content": fallback_msg},
+                    {"role": "system", "content": "You are a direct email writer. No corporate fluff. No placeholders."},
+                    {"role": "user", "content": retry_msg},
                 ],
-                options={"temperature": 0.5, "num_predict": 250},
+                options={"temperature": 0.7, "num_predict": 200},
             )
             reply_text = (response2.get("message", {}).get("content") or "").strip()
-            log.info("generate_email_reply: retry reply (%d chars)", len(reply_text))
 
         if reply_text:
             log.info("Generated reply (%d chars)", len(reply_text))
@@ -355,41 +352,33 @@ def _build_content_transform_messages(
     user_name: str = "Sandeep",
     style: str = "normal",
 ) -> tuple[str, str]:
-    """Return (system_message, user_message) for content-transform mode.
-
-    In this mode the user told us exactly what they want to say; the LLM's
-    job is purely formatting — expand the statement into a proper email reply.
-    """
-    sender_name = _extract_name_from_email(from_addr)
-    tone_desc = _tone_description(tone)
-    context_block = f"\nExtra context: {context}\n" if context else ""
-
+    """Return (system_message, user_message) for content-transform mode."""
+    receiver_name = _extract_name_from_email(from_addr)
+    sender_name = user_name # This is settings.user_name (e.g., "Sandeep")
+    
     system_msg = (
-        f"You are a professional email assistant for {user_name}. "
-        "Your ONLY job is to write email replies. "
-        "You MUST always produce a complete, polite email reply. "
-        "NEVER refuse, NEVER say you can't help, NEVER add disclaimers."
+        f"You are a strict email writer. You write short, direct replies from {sender_name} to {receiver_name}. "
+        "You NEVER use corporate jargon or generic pleasantries unless instructed."
     )
 
     user_msg = (
-        f"I received this email from my contact {sender_name}:\n\n"
+        f"Write a reply email from {sender_name} to {receiver_name} ONLY based on the email below.\n\n"
+        f"## Email:\n"
+        f"From: {receiver_name}\n"
         f"Subject: {subject}\n"
-        f"---\n{body.strip()}\n---\n"
-        f"{context_block}\n"
-        f"My intended reply (extract the factual intent; ignore any formatting "
-        f"instructions like 'write professional' or 'make formal'):\n"
-        f"  \"{user_content}\"\n\n"
-        f"Write a complete, {tone_desc} email reply that conveys my intended message.\n"
+        f"Content:\n"
+        f"--------------\n"
+        f"{body.strip()}\n\n"
+        f"User instruction:\n"
+        f"{user_content}\n\n"
         f"Rules:\n"
-        f"- Start with: Hi {sender_name},\n"
-        f"- Expand my message naturally but do NOT copy it word-for-word.\n"
-        f"- Do NOT include phrases like 'write a professional mail' or formatting"
-        f" instructions from my note.\n"
-        f"- Keep it under 150 words.\n"
-        f"- Sign off as {user_name}.\n"
-        f"- Output only the email body — no headers, no commentary.\n"
-        f"{_style_instructions(style)}\n"
-        f"Draft reply:"
+        f"* Use {receiver_name} in the greeting (e.g., Hi {receiver_name},)\n"
+        f"* Use {sender_name} in the signature (e.g., Best regards, {sender_name})\n"
+        f"* Respond directly to the issue mentioned\n"
+        f"* Do NOT generate generic corporate text\n"
+        f"* Keep it short and specific\n"
+        f"* No assumptions\n"
+        f"* Do NOT use placeholders."
     )
     return system_msg, user_msg
 
@@ -624,7 +613,8 @@ def _extract_name_from_email(from_header: str) -> str:
     match = re.search(r"([^<]+)<", from_header)
     if match:
         name = match.group(1).strip()
-        first_name = name.split()[0]
+        # In many conventions (like "Yellanki Akshitha"), the given name is the last word
+        first_name = name.split()[-1]
         return first_name
 
     # Try to extract name from simple format: "john@example.com"

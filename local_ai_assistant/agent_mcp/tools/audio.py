@@ -63,10 +63,12 @@ def audio_transcribe(
     return transcribe_and_index(file_path, model_size=model_size)
 
 
+from configs.llm_config import MODEL_NAME
+
 def audio_query(
     query: str,
     filename: str = "",
-    model: str = "llama3.2:1b",
+    model: str = MODEL_NAME,
     top_k: int = 5,
 ) -> dict:
     """
@@ -88,7 +90,7 @@ def audio_query(
         Optional — restrict search to a specific audio file.
         Leave blank to search ALL indexed audio files.
     model : str
-        Ollama model to use (default llama3.2:1b).
+        Ollama model to use (default gemma:7b).
     top_k : int
         Number of transcript chunks to retrieve (default 5).
 
@@ -98,6 +100,7 @@ def audio_query(
         success, query, answer, sources
         sources: [{filename, start_ts, end_ts, snippet}, ...]
     """
+    print(f"[LLM] Using model: {model}")
     return query_audio(
         query,
         filename=filename or None,

@@ -21,11 +21,13 @@ langchain-core==0.1.53
 langchain-text-splitters==0.0.2
 
 # ── Data / documents ─────────────────────────────────────────────────────────
-pandas==3.0.1
+pandas==2.3.3
 numpy==1.26.4
-scipy==1.17.0
+scipy==1.11.4
 Pillow==12.1.1
 pytesseract==0.3.13
+pdf2image>=1.17.0
+pypdf>=4.0.0
 python-docx>=1.1.0
 python-pptx>=1.0.0
 openpyxl>=3.1.0

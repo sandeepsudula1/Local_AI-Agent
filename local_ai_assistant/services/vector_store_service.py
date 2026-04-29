@@ -115,14 +115,26 @@ class VectorStoreService:
         self._loading = True
         try:
             # Import heavy dependencies lazily so startup is fast
-            from langchain_community.embeddings import HuggingFaceEmbeddings
-            from langchain_community.vectorstores import Chroma
-            from langchain_text_splitters import RecursiveCharacterTextSplitter
+            try:
+                from langchain_community.embeddings import HuggingFaceEmbeddings
+                from langchain_community.vectorstores import Chroma
+                from langchain_text_splitters import RecursiveCharacterTextSplitter
+            except ImportError as exc:
+                log.error("[CRITICAL] Missing LangChain modules in bundle: %s", exc)
+                log.warning("[WARN] Vector store disabled due to missing embedding backend (langchain_community).")
+                return
 
-            emb = HuggingFaceEmbeddings(
-                model_name=settings.embedding_model,
-                model_kwargs={"device": settings.embedding_device},
-            )
+            try:
+                log.info("Initializing embeddings model: %s", settings.embedding_model)
+                emb = HuggingFaceEmbeddings(
+                    model_name=settings.embedding_model,
+                    model_kwargs={"device": settings.embedding_device},
+                )
+                log.info("[OK] Embeddings model loaded successfully")
+            except Exception as exc:
+                log.error("Failed to load embeddings model: %s", exc)
+                log.warning("[WARN] Vector store disabled: Embeddings model failed to load.")
+                return
 
             store_path = str(settings.vector_store_path)
 
@@ -205,6 +217,10 @@ class VectorStoreService:
                 except Exception as exc:
                     log.error("Vector store build error: %s", exc)
                     return
+        except Exception as exc:
+            import traceback
+            log.error("Unexpected error in vector store loader thread: %s\n%s", exc, traceback.format_exc())
+            log.warning("[WARN] Vector store functionality is disabled due to a thread crash.")
 
         finally:
             self._loading = False

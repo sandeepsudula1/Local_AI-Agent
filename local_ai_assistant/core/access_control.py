@@ -53,10 +53,13 @@ Notes
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Authorised folders
@@ -65,9 +68,15 @@ from typing import Optional
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))  # core/
 _PROJECT_ROOT = os.path.dirname(_MODULE_DIR)               # project root
 
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    _DOCS_DIR = os.path.normpath(os.path.join(str(_DATA_DIR), "documents"))
+except Exception:
+    _DOCS_DIR = os.path.normpath(os.path.join(_PROJECT_ROOT, "data", "documents"))
+
 ALLOWED_FOLDERS: list[str] = [
-    "C:\\AI_Test_Documents",
-    os.path.normpath(os.path.join(_PROJECT_ROOT, "data", "documents")),
+    os.path.expanduser("~"),
+    _DOCS_DIR,
 ]
 
 # Pre-seed the built-in folders into the permission store so that
@@ -111,6 +120,16 @@ _GLOBAL_RESTRICT_RE = re.compile(
     r"|system\s+files?"
     r"|(?:my\s+)?(?:downloads?|desktop|pictures?|music|videos?)\s*folder\b"
     r")\b",
+    re.IGNORECASE,
+)
+
+# Fast-path: explicit folder selection — user is explicitly setting a folder context.
+# E.g. "Use folder C:\AI_Test_Documents", "set folder to C:\...", "switch to C:\..."
+# These must return ALLOW_FOLDER immediately so last_folder is always stored.
+_SET_FOLDER_RE = re.compile(
+    r"^\s*(?:use|set|switch\s+to|select|choose|change\s+to|go\s+to|focus\s+on"
+    r"|work\s+(?:from|with|on)|apply|activate|open)\s+"
+    r"(?:folder|directory|path|location)?\s*",
     re.IGNORECASE,
 )
 
@@ -180,9 +199,10 @@ def _classify_access_intent(text: str) -> str:
     # ── 2. LLM fallback for ambiguous phrasing ────────────────────────────
     try:
         import ollama
-        from configs.settings import settings as _s
+        from configs.llm_config import MODEL
+        print(f"[LLM] Using model: {MODEL}")
         resp = ollama.chat(
-            model=_s.model_name,
+            model=MODEL,
             options={"temperature": 0.0, "num_predict": 10},
             messages=[
                 {
@@ -252,6 +272,27 @@ _SYSTEM_PATH_RE = re.compile(
     r"^[A-Za-z]:\\?$"                          # bare drive root: C:\ or C:
     r"|[A-Za-z]:\\(?:Windows|System32|Program\s*Files\S*|Users\\[^\\]+\\AppData)"
     r")",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# File-discovery passthrough
+# ---------------------------------------------------------------------------
+# Queries that ask to FIND / LOCATE / LIST files must bypass access control
+# entirely.  The SQLite metadata index is global and needs no folder scope;
+# letting Case 8 CLARIFY on these would produce spurious "Which folder?" prompts.
+_FILE_DISCOVERY_PASSTHROUGH_RE = re.compile(
+    r"\b(?:find|locate|search\s+for|look\s+for|open|get\s+me|show\s+me)\b"
+    r".{0,60}"
+    r"\b(?:resume|cv|curriculum\s+vitae|report|invoice|contract|proposal"
+    r"|notes?|manual|guide|handbook|slides?|presentation|spreadsheet"
+    r"|budget|plan|schedule|log|portfolio|brochure|certificate"
+    r"|deed|receipt|letter|file|document|doc)"
+    r"|\b(?:find|locate|search\s+for|look\s+for|open)\b"
+    r".{0,40}"
+    r"\b[\w][\w\-]*\.(?:pdf|docx?|pptx?|txt|md|csv|xlsx?|json|log)\b"
+    r"|\b(?:list|show|display)\b.{0,30}\b(?:all\s+)?(?:my\s+)?(?:files?|documents?)\b"
+    r"|\b(?:files?|documents?)\b.{0,30}\b(?:available|indexed|stored|uploaded)\b",
     re.IGNORECASE,
 )
 
@@ -479,7 +520,13 @@ def _decide_for_path(path: str, has_content_op: bool, is_access_q: bool) -> Acce
     if has_content_op and not is_access_q:
         # Content operation on an allowed path → scope retrieval to that folder
         return AccessDecision(action="ALLOW_FOLDER", folder_path=path)
-    # Access/permission question on an allowed path → affirmative answer
+    if not is_access_q:
+        # Explicit folder selection ("use folder X", "set folder X", etc.) —
+        # neither a content query NOR an access check, but user clearly intends
+        # to activate this folder as their current context.  Return ALLOW_FOLDER
+        # so last_folder is ALWAYS stored in session memory.
+        return AccessDecision(action="ALLOW_FOLDER", folder_path=path)
+    # Pure access/permission question on an allowed path → affirmative answer only
     return AccessDecision(
         action="BLOCK",
         message=f"\u2705 Yes, I have access to that location:\n\U0001f4c1 {path}",
@@ -506,10 +553,31 @@ def check_access_query(
     """
     text = query.strip()
 
+    # ── Fast-exit: no file/access/folder signal at all → PASS immediately ────
+    # Prevents general/math/conversational queries ("if I have 3 apples",
+    # "what is AI", "remind me to ...") from going through the access-control
+    # NLU (especially the LLM fallback which can misclassify anything).
+    # ACCESS_CONTROL only makes sense when the query contains at least one
+    # explicit file/folder/path/access-domain keyword.
+    _ACCESS_SIGNAL_RE = re.compile(
+        r"\b(?:access|permission|permit|folder|directory|file|document|doc|path|drive|"
+        r"grant|allow|restrict|block|deny|read|load|fetch|retrieve|"
+        r"summarize|summarise|list\s+(?:file|doc)|find|locate|open|search|index)\b"
+        r"|[A-Za-z]:\\\\"
+        r"|\.(?:pdf|docx?|txt|csv|xlsx?|pptx?|py|js|json|xml|yaml|md|log)\b",
+        re.IGNORECASE,
+    )
+    if not _ACCESS_SIGNAL_RE.search(text):
+        return _PASS
+
     # ── Email-operation fast-exit ─────────────────────────────────────────────
     # Reply/response/compose phrases are email actions, not file-system queries.
     # Return PASS immediately so the intent classifier handles them correctly.
     # Without this, the access-control NLU misclassifies them and returns BLOCK.
+    if _FILE_DISCOVERY_PASSTHROUGH_RE.search(text):
+        log.debug("[ACCESS_CTRL] file-discovery passthrough (PASS): %.60s", text)
+        return _PASS
+
     if _EMAIL_OP_PASSTHROUGH_RE.search(text):
         log.debug("[ACCESS_CTRL] email-op passthrough (PASS): %.60s", text)
         return _PASS
@@ -519,6 +587,35 @@ def check_access_query(
     # "Desktop" or "Downloads" inside a real Windows path are never matched
     # by the global-restrict or intent patterns below.
     path = _extract_path(text)
+
+    # ── Step 1b: Explicit folder-selection fast-path ─────────────────────
+    # "Use folder X", "Set folder X", "Switch to X" — user is explicitly
+    # activating a folder context.  Skip intent classification entirely and
+    # return ALLOW_FOLDER immediately when the path is allowed, or
+    # REQUEST_PERMISSION when it is not.
+    if path and _SET_FOLDER_RE.match(text):
+        log.debug("[ACCESS_CTRL] SET_FOLDER match for path=%r", path)
+        if _is_path_allowed(path):
+            return AccessDecision(action="ALLOW_FOLDER", folder_path=path)
+        if not _is_system_path(path) and os.path.exists(path):
+            return AccessDecision(
+                action="REQUEST_PERMISSION",
+                folder_path=path,
+                message=(
+                    f"🔒 Access Required\n\n"
+                    f"I don't currently have permission to access:\n\n"
+                    f"📁 {path}\n\n"
+                    f"Type **yes** to grant access or **no** to cancel."
+                ),
+            )
+        if not os.path.exists(path):
+            return AccessDecision(
+                action="BLOCK",
+                message=(
+                    f"❌ Folder not found on disk:\n📁 {path}\n\n"
+                    "Please check the spelling and try again."
+                ),
+            )
 
     # ── Step 2: Classify intent with NLU (regex fast-path + LLM fallback) ──
     access_intent = _classify_access_intent(text)

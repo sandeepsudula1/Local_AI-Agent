@@ -559,7 +559,12 @@ def _handle_email_send(user_input: str, **ctx) -> tuple[str, str]:
     # CRITICAL: User must confirm with confirmation keywords
     # "yes", "send", "confirm", "go", "ok", etc.
     confirm_words = {"yes", "go", "send", "confirm", "proceed", "do it", "ok", "yeah", "sure", "yep"}
+    save_draft_words = {"save", "draft"}
     user_lower = user_input.lower()
+
+    # PART 5: ACTION CONFIRMATION — Check for "save as draft"
+    if all(word in user_lower for word in save_draft_words):
+        return f"✓ OK. I've saved the email as a draft (ID: {draft_id or 'New'}). You can send it later.", ""
 
     has_confirm = any(word in user_lower for word in confirm_words)
     if not has_confirm:
@@ -567,7 +572,8 @@ def _handle_email_send(user_input: str, **ctx) -> tuple[str, str]:
         confirm_msg = send_email_confirmation(to_email, subject, body)
         return (
             f"{confirm_msg}\n\n"
-            "⚠️  Please confirm by saying 'yes', 'send it', 'confirm', or 'go ahead'",
+            "Do you want to **send** this email or **save as draft**?\n"
+            "⚠️  Please confirm by saying 'yes', 'send it', or 'save as draft'",
             "",
         )
 

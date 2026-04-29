@@ -19,14 +19,37 @@ Usage::
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
-# Project root — always the directory that contains this configs/ package
+# Project root — always the directory that contains this configs/ package.
+# When running as a PyInstaller frozen .exe, __file__ resolves to the
+# temporary _MEIPASS extraction folder, so we use the executable's directory
+# instead (that is the user-visible deploy folder that sits next to .env).
 # ---------------------------------------------------------------------------
 _CONFIGS_DIR = Path(__file__).parent
-PROJECT_ROOT: Path = _CONFIGS_DIR.parent
+if getattr(sys, "frozen", False):
+    # PyInstaller bundle: sys.executable == path/to/LocalAIAssistant.exe
+    PROJECT_ROOT: Path = Path(sys.executable).parent
+else:
+    PROJECT_ROOT = _CONFIGS_DIR.parent
+
+# ---------------------------------------------------------------------------
+# Writable data directory — NEVER inside Program Files.
+# All user-writable data goes to %USERPROFILE%\.ai_agent\data.
+# This ensures stability across machines and bypasses read-only EXE folders.
+# ---------------------------------------------------------------------------
+_BASE_USER_DIR = Path(os.path.expanduser("~")) / ".ai_agent"
+DATA_DIR: Path = _BASE_USER_DIR / "data"
+
+os.makedirs(DATA_DIR, exist_ok=True)
+# Pre-create subdirectories that services write to at runtime so the first
+# run never hits a missing-directory error inside Program Files or similar
+# read-only locations.
+for _sub in ("logs", "documents", "audio"):
+    os.makedirs(DATA_DIR / _sub, exist_ok=True)
 
 
 def _load_dotenv() -> None:
@@ -87,7 +110,7 @@ class Settings:
 
     # ── LLM ─────────────────────────────────────────────────────────────────
     model_name: str = field(
-        default_factory=lambda: _env("MODEL_NAME", "llama3.2:1b")
+        default_factory=lambda: _env("MODEL_NAME", "qwen2.5:3b")
     )
     model_temperature: float = field(
         default_factory=lambda: _env_float("MODEL_TEMPERATURE", 0.7)
@@ -108,8 +131,8 @@ class Settings:
 
     # ── Vector store ─────────────────────────────────────────────────────────
     vector_store_path: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env(
-            "VECTOR_STORE_PATH", "data/vector_store_v2"
+        default_factory=lambda: DATA_DIR / _env(
+            "VECTOR_STORE_PATH", "vector_store_v2"
         )
     )
     vector_store_k: int = field(
@@ -127,13 +150,13 @@ class Settings:
 
     # ── Documents ────────────────────────────────────────────────────────────
     docs_path: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env("DOCS_PATH", "data/documents")
+        default_factory=lambda: DATA_DIR / _env("DOCS_PATH", "documents")
     )
 
     # ── Reminders ────────────────────────────────────────────────────────────
     reminders_file: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env(
-            "REMINDERS_FILE", "data/reminders.json"
+        default_factory=lambda: DATA_DIR / _env(
+            "REMINDERS_FILE", "reminders.json"
         )
     )
     reminder_poll_interval: int = field(
@@ -145,11 +168,11 @@ class Settings:
 
     # ── Email ────────────────────────────────────────────────────────────────
     email_file: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env("EMAIL_FILE", "data/emails.json")
+        default_factory=lambda: DATA_DIR / _env("EMAIL_FILE", "emails.json")
     )
     email_cache_file: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env(
-            "EMAIL_CACHE_FILE", "data/email_cache.json"
+        default_factory=lambda: DATA_DIR / _env(
+            "EMAIL_CACHE_FILE", "email_cache.json"
         )
     )
     email_fetch_cooldown: int = field(
@@ -161,8 +184,8 @@ class Settings:
 
     # Email semantic search settings
     email_vector_store_path: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env(
-            "EMAIL_VECTOR_STORE_PATH", "data/vector_store_email"
+        default_factory=lambda: DATA_DIR / _env(
+            "EMAIL_VECTOR_STORE_PATH", "vector_store_email"
         )
     )
     email_embedding_model: str = field(
@@ -207,26 +230,26 @@ class Settings:
         default_factory=lambda: _env_bool("EMAIL_TLS", True)
     )
     audio_path: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env("AUDIO_PATH", "data/audio")
+        default_factory=lambda: DATA_DIR / _env("AUDIO_PATH", "audio")
     )
     audio_vector_store_path: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env(
-            "AUDIO_VECTOR_STORE_PATH", "data/vector_store_audio"
+        default_factory=lambda: DATA_DIR / _env(
+            "AUDIO_VECTOR_STORE_PATH", "vector_store_audio"
         )
     )
 
     # ── Windows Documents indexer ─────────────────────────────────────────────
-    # Only C:\AI_Test_Documents is the authorised indexed folder.
-    # C:\Users\Sandeep\OneDrive\Documents is intentionally NOT indexed.
+    # Default: user's home directory. Override via WINDOWS_DOCS_PATH in .env.
+    # Example: WINDOWS_DOCS_PATH=C:\AI_Test_Documents
     windows_docs_path: Path = field(
         default_factory=lambda: Path(_env(
             "WINDOWS_DOCS_PATH",
-            r"C:\AI_Test_Documents",
+            os.path.expanduser("~"),
         ))
     )
     windows_docs_vector_store_path: Path = field(
-        default_factory=lambda: PROJECT_ROOT / _env(
-            "WINDOWS_DOCS_VECTOR_STORE_PATH", "data/vector_store_win_docs"
+        default_factory=lambda: DATA_DIR / _env(
+            "WINDOWS_DOCS_VECTOR_STORE_PATH", "vector_store_win_docs"
         )
     )
     # Comma-separated subfolder names relative to windows_docs_path to restrict
@@ -288,9 +311,14 @@ class Settings:
         return PROJECT_ROOT
 
     @property
+    def data_dir(self) -> Path:
+        """Absolute path to the writable data directory."""
+        return DATA_DIR
+
+    @property
     def logs_path(self) -> Path:
         """Absolute path to the logs directory."""
-        return PROJECT_ROOT / "logs"
+        return DATA_DIR / "logs"
 
 
 # ---------------------------------------------------------------------------

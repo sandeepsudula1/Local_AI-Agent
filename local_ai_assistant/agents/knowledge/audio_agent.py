@@ -51,9 +51,15 @@ if _AGENT_DIR not in sys.path:
 
 # ── constants ─────────────────────────────────────────────────────────────
 _EMBEDDING_MODEL  = "sentence-transformers/all-MiniLM-L6-v2"
-_AUDIO_STORE_PATH = str(_PROJECT_ROOT / "data" / "vector_store_audio")
-_AUDIO_DIR        = str(_PROJECT_ROOT / "data" / "audio")
-_MODEL_NAME       = "llama3.2:1b"
+try:
+    from configs.settings import DATA_DIR as _DATA_DIR
+    _AUDIO_STORE_PATH = str(Path(str(_DATA_DIR)) / "vector_store_audio")
+    _AUDIO_DIR        = str(Path(str(_DATA_DIR)) / "audio")
+except Exception:
+    _AUDIO_STORE_PATH = str(_PROJECT_ROOT / "data" / "vector_store_audio")
+    _AUDIO_DIR        = str(_PROJECT_ROOT / "data" / "audio")
+from configs.llm_config import MODEL
+_MODEL_NAME = MODEL
 _WORDS_PER_CHUNK  = 80      # ~30-40 s of speech per chunk
 _WHISPER_SIZE     = "base"  # tiny | base | small | medium | large
 
@@ -223,7 +229,7 @@ def transcribe_and_index(
         resolved = p
     else:
         # Try data/audio/<basename> first (most common user intent)
-        candidate = _PROJECT_ROOT / "data" / "audio" / p.name
+        candidate = Path(_AUDIO_DIR) / p.name
         if candidate.exists():
             resolved = candidate
         else:
@@ -233,7 +239,7 @@ def transcribe_and_index(
                 resolved = candidate2
 
     if resolved is None or not resolved.exists():
-        audio_dir_display = str(_PROJECT_ROOT / "data" / "audio")
+        audio_dir_display = _AUDIO_DIR
         return {
             "success": False,
             "error": (
@@ -358,7 +364,7 @@ def query_audio(
         Restrict search to a specific audio file.  When None, all indexed
         audio files are searched.
     model : str
-        Ollama model name (default llama3.2:1b).
+        Ollama model name.
     top_k : int
         Number of transcript chunks to retrieve (default 5).
 
@@ -469,6 +475,7 @@ def query_audio(
 
     try:
         import ollama as _ollama
+        print(f"[LLM] Using model: {model}")
         response = _ollama.chat(
             model=model,
             messages=[{"role": "user", "content": prompt}],

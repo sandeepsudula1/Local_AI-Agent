@@ -53,7 +53,7 @@ print(by_source[0].page_content[:1000])
 try:
     from agents.knowledge.summary_agent import handle_summary
     print('\nCalling handle_summary on the selected document chunks...')
-    summary = handle_summary(by_source, 'llama3.2:1b')
+    summary = handle_summary(by_source, 'gemma:7b')
     print('\nSummary result:\n')
     print(summary)
 except Exception as e:
