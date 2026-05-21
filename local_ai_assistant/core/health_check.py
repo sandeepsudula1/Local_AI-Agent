@@ -115,6 +115,45 @@ def run_health_check():
     else:
         status_report.append("[WARN] Poppler: Not found (PDF scanning disabled)")
 
+    # C. Pipeline Syntax & Import Validation (Fail Fast)
+    try:
+        import agents.knowledge.retrieval_agent
+        import engines.embedding_engine
+        import engines.rag_engine
+        import services.file_indexer_service
+        status_report.append("[OK] Pipeline Integrity: Syntax and imports validated")
+    except SyntaxError as e:
+        status_report.append(f"[FAIL] Pipeline Integrity: SyntaxError in {e.filename} line {e.lineno}")
+        status_report.append(f"       Details: {e.text.strip() if getattr(e, 'text', None) else ''}")
+        critical_failed = True
+    except ImportError as e:
+        status_report.append(f"[FAIL] Pipeline Integrity: ImportError ({e})")
+        critical_failed = True
+    except Exception as e:
+        status_report.append(f"[FAIL] Pipeline Integrity: Unexpected Error ({e})")
+        critical_failed = True
+
+    # D. Memory API Compatibility Validation
+    try:
+        from memory.conversation_memory import ConversationMemory
+        mem = ConversationMemory()
+        required_methods = [
+            "add_pending_document",
+            "get_pending_documents",
+            "clear_pending_documents",
+            "set_last_file",
+            "get_last_file"
+        ]
+        missing = [m for m in required_methods if not hasattr(mem, m)]
+        if missing:
+            status_report.append(f"[FAIL] Memory Integrity: Missing APIs - {', '.join(missing)}")
+            critical_failed = True
+        else:
+            status_report.append("[OK] Memory Integrity: APIs validated")
+    except Exception as e:
+        status_report.append(f"[FAIL] Memory Integrity: Could not load Memory ({e})")
+        critical_failed = True
+
     # 4. FINAL OUTPUT
     # ---------------
     print("\n" + "\n".join(status_report))

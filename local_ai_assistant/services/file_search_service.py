@@ -71,27 +71,45 @@ def _extract_entity_and_keyword(query: str) -> tuple[Optional[str], str]:
     Returns (entity_string, keyword_string).
     """
     # Remove stopwords and generic terms
-    stop_pattern = re.compile(r"\b(find|show|me|email|mail|inbox|from|file|files|document|documents|related|contains|containing|about|do|to|the|which|what|can|you|is|are|in|the|above)\b", re.IGNORECASE)
+    stop_pattern = re.compile(
+        r"\b(find|show|me|email|mail|inbox|from|file|files|document|documents|"
+        r"related|contains|containing|about|do|to|the|which|what|can|you|is|are|in|the|above|"
+        r"for|my|some|any|where|was|there|on|of|at|by|with|into)\b", 
+        re.IGNORECASE
+    )
     cleaned = stop_pattern.sub(" ", query)
-    # Filter out words < 3 chars from the candidates
     tokens = [t for t in re.split(r"\s+", cleaned.strip()) if len(t) >= 3]
     if not tokens:
         return None, query
     
-    # Priority words handling
-    priority_topics = {"resume", "pizza", "report", "presentation"}
-    
-    # Check if any priority topic exists
     entity = None
+    
+    # 1. Look for filename-like phrases (e.g. word.pdf)
     for t in tokens:
-        if t.lower() in priority_topics:
+        if "." in t and len(t) > 3:
             entity = t
             break
             
-    # Fallback to the first meaningful word
+    # 2. Look for Capitalized words (excluding first word of sentence if possible, but we don't have casing context well)
     if not entity:
-        entity = tokens[0]
-        
+        capitalized = [t for t in tokens if t[0].isupper() and not t.isupper()]
+        if capitalized:
+            entity = " ".join(capitalized)
+            
+    # 3. Priority topics
+    if not entity:
+        priority_topics = {"resume", "report", "presentation", "guide", "manual", "news"}
+        for t in tokens:
+            if t.lower() in priority_topics:
+                entity = t
+                break
+                
+    # 4. Fallback to longest token, ignoring likely typos
+    if not entity:
+        valid_tokens = [t for t in tokens if t.lower() not in ("realted", "doc", "txt", "pdf")]
+        if valid_tokens:
+            entity = max(valid_tokens, key=len)
+            
     keyword = " ".join(tokens)
     return entity, keyword
 
@@ -267,7 +285,7 @@ class FileSearchService:
         ))
         _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"})
 
-        # ── Gather keyword results ───────────────────────────────────────
+        # ── TIER 1 & 2: Gather keyword results ───────────────────────────────
         kw_results: list[dict] = []
         try:
             from services.file_indexer_service import file_indexer
@@ -275,13 +293,31 @@ class FileSearchService:
         except Exception as exc:
             log.debug("[FileSearch] keyword search failed: %s", exc)
 
-        # ── Gather semantic results ──────────────────────────────────────
+        # ── TIER 3: Semantic results (ONLY if kw_results are poor) ───────────
         sem_results: list[dict] = []
-        try:
-            from services.file_indexer_service import file_indexer
-            sem_results = file_indexer.semantic_search(expanded_query, limit=limit * 2)
-        except Exception as exc:
-            log.debug("[FileSearch] semantic search failed: %s", exc)
+        # If we have good keyword matches, skip semantic search to save 60s
+        # A good match is a keyword match that actually hits the filename or hint.
+        needs_semantic = True
+        if kw_results:
+            kw_tokens = set(t.lower() for t in re.split(r"\s+", expanded_keywords.strip()) if len(t) >= 3)
+            best_raw = 0
+            for r in kw_results:
+                name_lc = (r.get("name") or "").lower()
+                hint_lc = (r.get("content_hint") or "").lower()
+                raw = sum(4 for tok in kw_tokens if tok in name_lc) + sum(1 for tok in kw_tokens if tok in hint_lc)
+                if raw > best_raw:
+                    best_raw = raw
+            if best_raw >= 4:
+                print(f"[SEARCH] TIER 1/2 success (best_raw={best_raw}). Skipping TIER 3 Semantic Search.")
+                needs_semantic = False
+                
+        if needs_semantic:
+            print("[SEARCH] TIER 1/2 insufficient. Falling back to TIER 3 Semantic Search.")
+            try:
+                from services.file_indexer_service import file_indexer
+                sem_results = file_indexer.semantic_search(expanded_query, limit=limit)
+            except Exception as exc:
+                log.debug("[FileSearch] semantic search failed: %s", exc)
 
         # ── Fuse scores ─────────────────────────────────────────────────
         # Build a path → combined-score map

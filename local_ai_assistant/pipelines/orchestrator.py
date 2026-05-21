@@ -446,22 +446,26 @@ class Orchestrator:
 
     def run(self, user_input: str) -> AgentResponse:
         """Main entry point for processing user requests."""
-        # PART 7: TIMEOUT CONTROL — Set max execution time per task (60s)
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self._run_internal, user_input)
-            try:
-                return future.result(timeout=60.0)
-            except concurrent.futures.TimeoutError:
-                log.error("Orchestrator: Task timed out (60s) for: %r", user_input[:60])
-                return AgentResponse(
-                    answer="⚠️ Execution timed out. The task was cancelled gracefully to protect system resources.",
-                    intent="TIMEOUT"
-                )
-            except Exception as e:
-                import traceback
-                log.error("Orchestrator unhandled error: %s\n%s", e, traceback.format_exc())
-                return AgentResponse(answer="Something went wrong while processing your request. Please try again.", intent="ERROR")
+        print("[TASK_START] Orchestrator processing query")
+        t_start = time.time()
+        try:
+            resp = self._run_internal(user_input)
+            duration = time.time() - t_start
+            print(f"[TASK_COMPLETE] Orchestrator finished in {duration:.2f}s")
+            return resp
+        except Exception as e:
+            duration = time.time() - t_start
+            import traceback
+            log.error("Orchestrator unhandled error: %s\n%s", e, traceback.format_exc())
+            
+            # Identify specific exceptions
+            if isinstance(e, TimeoutError):
+                print(f"[TASK_TIMEOUT] Orchestrator timed out in {duration:.2f}s")
+            else:
+                print(f"[TASK_EXCEPTION] Orchestrator failed with {type(e).__name__} in {duration:.2f}s")
+                
+            print("[TASK_CLEANUP] Ensuring resources are released")
+            return AgentResponse(answer="An internal error occurred while processing your request. Please try again.", intent="ERROR")
 
     def process_query(self, user_input: str) -> AgentResponse:
         """Alias for run() to maintain compatibility with legacy callers."""
@@ -676,10 +680,140 @@ class Orchestrator:
         # ── 1. Conversati        # ═══════════════════════════════════════════════════════════════════
         # PART 1: ROUTING & CONTEXT RESOLUTION
         # ═══════════════════════════════════════════════════════════════════
-        from agents.core.planner_agent import get_semantic_mode
+        from agents.core.planner_agent import get_semantic_mode, check_context_link
         
-        semantic_mode = get_semantic_mode(text, has_active_file=bool(self._active_file_path))
+        _active_file_name = os.path.basename(self._active_file_path) if self._active_file_path else ""
+        semantic_mode = get_semantic_mode(text, has_active_file=bool(self._active_file_path), active_file_name=_active_file_name)
         query_lower = text.lower()
+        
+        # ── Context-Aware Routing & Conversational Task Continuity Engine ─────
+        query_scope = "GLOBAL"
+        context_relevance = "LOW"
+        task_continuity = "NEW_TASK"
+        task_switch = "NONE"
+        active_override = "SKIPPED"
+        route_decision = semantic_mode
+        reference_resolution = "NONE"
+        context_link_result = {"is_linked": False, "confidence": "LOW", "reasoning": ""}
+
+        has_active = bool(self._active_file_path)
+        is_confirmed_global = False
+
+        # Get conversation history for context link analysis
+        _routing_history = []
+        try:
+            from memory.conversation_memory import conversation_memory as _cmem
+            _routing_history = _cmem.get_history(last_n=4)
+        except Exception:
+            pass
+
+        # ── Step 1: Hard-pass EMAIL intents — always global, never doc-related ─
+        if semantic_mode in ("EMAIL_SEARCH", "EMAIL_COMPOSE", "EMAIL_REPLY"):
+            is_confirmed_global = True
+            query_scope = "GLOBAL"
+            task_switch = "EMAIL_TASK"
+            task_continuity = "NEW_TASK"
+
+        # ── Step 2: If LLM classified FILE_SEARCH with an active document open,
+        #    run context-link check before accepting it as a true global search.
+        #    This prevents misclassified follow-up questions from triggering
+        #    a file search dialog unnecessarily.
+        elif semantic_mode == "FILE_SEARCH" and has_active:
+            context_link_result = check_context_link(
+                query=text,
+                active_file_name=_active_file_name,
+                history=_routing_history
+            )
+            print(f"[CONTEXT_LINK] is_linked={context_link_result['is_linked']} | "
+                  f"confidence={context_link_result['confidence']} | "
+                  f"{context_link_result['reasoning']}")
+
+            if context_link_result["is_linked"]:
+                # The LLM misclassified a document follow-up as FILE_SEARCH
+                # Override back to DOCUMENT_QA
+                semantic_mode = "DOCUMENT_QA"
+                route_decision = "DOCUMENT_QA"
+                query_scope = "LOCAL"
+                context_relevance = "HIGH"
+                task_continuity = "CONTINUED"
+                active_override = "APPLIED"
+                reference_resolution = "RESOLVED_TO_ACTIVE_DOC"
+            else:
+                # Confirmed genuine global search
+                is_confirmed_global = True
+                query_scope = "GLOBAL"
+                task_switch = "FILE_SEARCH"
+                task_continuity = "NEW_TASK"
+                reference_resolution = "NONE"
+
+        # ── Step 3: FILE_SEARCH with no active doc — genuine global search ─────
+        elif semantic_mode == "FILE_SEARCH" and not has_active:
+            is_confirmed_global = True
+            query_scope = "GLOBAL"
+            task_switch = "FILE_SEARCH"
+            task_continuity = "NEW_TASK"
+
+        # ── Step 4: If an active file exists and intent is FILE_QA or GENERAL/UNKNOWN,
+        #    run context relevance check to decide between DOCUMENT_QA and pass-through.
+        if has_active and not is_confirmed_global and semantic_mode not in (
+            "DOCUMENT_QA", "EMAIL_SEARCH", "EMAIL_COMPOSE", "EMAIL_REPLY"
+        ):
+            # Check for explicit document reference signals
+            local_indicators = [
+                r"\b(?:above\s+documents?|this\s+files?|this\s+documents?|the\s+documents?|the\s+files?)\b",
+                r"\b(?:mentioned|in\s+this|from\s+this|from\s+above|in\s+the\s+doc)\b",
+                r"\b(?:summarize|summary|gist|tldr|explain|overview|details)\b",
+                r"\b(?:it|this|above)\b",
+                r"\b(?:subjects?\s+in\s+this|summarize\s+it)\b"
+            ]
+
+            # Enrich for academic transcripts
+            from services.academic_pdf_parser import AcademicPDFParser
+            if AcademicPDFParser.is_academic_pdf(self._active_file_path):
+                local_indicators.extend([
+                    r"\b(?:semesters?|subjects?|grades?|cgpa|sgpa|credits?|marks?|fail|pass|backlogs?|hall\s+ticket)\b"
+                ])
+
+            if any(re.search(pat, query_lower) for pat in local_indicators):
+                context_relevance = "HIGH"
+                query_scope = "LOCAL"
+                route_decision = "DOCUMENT_QA"
+                active_override = "APPLIED"
+                task_continuity = "CONTINUED"
+                reference_resolution = "RESOLVED_TO_ACTIVE_DOC"
+            else:
+                context_relevance = "LOW"
+                query_scope = "GLOBAL"
+                route_decision = semantic_mode if semantic_mode not in ("DOCUMENT_QA", "FILE_QA") else "GENERAL"
+                active_override = "SKIPPED"
+                task_continuity = "NEW_TASK"
+
+        # FILE_QA always means document context — route to DOCUMENT_QA
+        if semantic_mode == "FILE_QA":
+            route_decision = "DOCUMENT_QA"
+            query_scope = "LOCAL"
+            context_relevance = "HIGH"
+            active_override = "APPLIED"
+            task_continuity = "CONTINUED"
+            reference_resolution = "RESOLVED_TO_ACTIVE_DOC"
+
+        # Apply final route decision
+        semantic_mode = route_decision
+
+        # ── Observability Trace Logs ──────────────────────────────────────────
+        _scope = context_link_result.get("semantic_scope", "ACTIVE_DOC" if context_link_result.get("is_linked") else "OTHER")
+        _is_collection = (_scope == "DOCUMENT_COLLECTION")
+
+        print(f"\n[SEMANTIC_SCOPE] {_scope}")
+        if _is_collection:
+            print(f"[DOCUMENT_COLLECTION_QUERY] YES — user is searching for other documents")
+        if task_continuity == "NEW_TASK" and route_decision != semantic_mode:
+            print(f"[TASK_TRANSITION] DOCUMENT_QA -> {route_decision}")
+        elif task_continuity == "CONTINUED":
+            print(f"[TASK_TRANSITION] CONTINUED (DOCUMENT_QA)")
+        print(f"[ACTIVE_DOC_RELEVANCE] {context_relevance}")
+        print(f"[FINAL_ROUTE] {route_decision}")
+
         
         if semantic_mode == "EMAIL_SEARCH":
             print("[EMAIL] Search Feature triggered")
@@ -820,40 +954,122 @@ class Orchestrator:
             self._post_process(text, _fs_resp, tool_name="FILE_SEARCH")
             return _fs_resp
 
-        elif semantic_mode == "FILE_QA":
-            # Safety check: if no active file, we can't do FILE_QA. Fall back to GENERAL.
+        elif semantic_mode in ("FILE_QA", "DOCUMENT_QA"):
+            # Safety check: if no active file, we can't do DOCUMENT_QA. Fall back to GENERAL.
             if not self._active_file_path:
-                print("[ROUTER] FILE_QA triggered but no active file. Routing to GENERAL")
+                print("[ROUTER] DOCUMENT_QA triggered but no active file. Routing to GENERAL")
                 semantic_mode = "GENERAL"
             else:
-                print("[ROUTER] FILE_QA triggered")
-                print(f"[FILE] Active context: {os.path.basename(self._active_file_path)}")
+                print("[ROUTER] DOCUMENT_QA triggered")
+                print(f"[ACTIVE_FILE] {os.path.basename(self._active_file_path)}")
                 try:
-                    # Reload content if missing
-                    if not self._active_file_content:
-                        from agents.knowledge.retrieval_agent import _load_document_from_path
-                        loaded_content = _load_document_from_path(self._active_file_path)
-                        self._active_file_content = loaded_content if loaded_content else ""
+                    # Specialized parser for academic structured PDFs
+                    from services.academic_pdf_parser import AcademicPDFParser, handle_structured_academic_qa
+                    if AcademicPDFParser.is_academic_pdf(self._active_file_path):
+                        print(f"[DOC_TYPE] STRUCTURED_ACADEMIC detected for {os.path.basename(self._active_file_path)}")
+                        ans = handle_structured_academic_qa(self._active_file_path, text)
+                        print(f"[FINAL_ROUTE] STRUCTURED_QA")
+                        resp = AgentResponse(answer=ans, intent="DOCUMENT_QA")
+                        resp.latency_ms = (time.perf_counter() - t0) * 1_000
+                        self._post_process(text, resp, tool_name="DOCUMENT_QA")
+                        return resp
 
-                    # PART 7: VALIDATE INPUT BEFORE LLM
-                    assert len(self._active_file_content) > 50, "File content not properly loaded."
-                    print("[FILE] Content length:", len(self._active_file_content))
+                    # ── Direct file load path (no vector store required) ──────────
+                    # The system uses SQLite for file indexing (no Chroma vector DB).
+                    # Load, parse, and answer directly from the file on disk.
+                    # This reliably handles .docx, .txt, .pdf, and all other formats.
+                    print(f"[DOCUMENT_INDEX] File selected: {os.path.basename(self._active_file_path)}")
+                    print(f"[VECTOR_STORE] Direct-load mode — no vector store required")
+                    print(f"[CHUNK_LOAD] Loading document from disk: {self._active_file_path}")
 
-                    from agents.knowledge.retrieval_agent import answer_from_file
-                    ans = answer_from_file(text, self._active_file_content, model_name=MODEL, file_path_used=self._active_file_path)
-                    resp = AgentResponse(answer=ans, intent="FILE_QA")
+                    from agents.knowledge.retrieval_agent import (
+                        _load_document_from_path,
+                        _is_summary_intent,
+                        answer_from_file,
+                    )
+
+                    content = _load_document_from_path(self._active_file_path)
+                    fname = os.path.basename(self._active_file_path)
+
+                    if content and not content.startswith("Error"):
+                        print(f"[EMBEDDING_READY] Document parsed: {len(content)} chars from {fname}")
+                        print(f"[RETRIEVAL_READY] Sending to LLM for: {fname}")
+                        is_summary = _is_summary_intent(text)
+                        ans = answer_from_file(
+                            query=text,
+                            content=content,
+                            model_name=MODEL,
+                            file_path_used=self._active_file_path,
+                            is_summary=is_summary,
+                        )
+                        if not ans:
+                            # LLM returned nothing — return raw excerpt
+                            ans = content[:3000]
+                    elif content and content.startswith("Error"):
+                        print(f"[DOCUMENT_INDEX] Load error for {fname}: {content}")
+                        ans = f"Could not read '{fname}': {content}"
+                    else:
+                        print(f"[DOCUMENT_INDEX] No content extracted from {fname}")
+                        ans = (
+                            f"Could not extract text from '{fname}'. "
+                            "The file may be empty or use an unsupported format."
+                        )
+
+                    print(f"[FINAL_ROUTE] DOCUMENT_QA")
+
+                    resp = AgentResponse(answer=ans, intent="DOCUMENT_QA")
                     resp.latency_ms = (time.perf_counter() - t0) * 1_000
-                    self._post_process(text, resp, tool_name="FILE_QA")
-                    return resp
-                except AssertionError as e:
-                    resp = AgentResponse(answer=str(e), intent="FILE_QA_ERROR")
-                    resp.latency_ms = (time.perf_counter() - t0) * 1_000
+                    self._post_process(text, resp, tool_name="DOCUMENT_QA")
                     return resp
                 except Exception as e:
                     import traceback
-                    print(traceback.format_exc())
-                    log.error(f"[FILE] Error in Active File QA: {e}")
-                    resp = AgentResponse(answer="Error processing file. Please try again.", intent="FILE_QA_ERROR")
+                    err_msg = str(e)
+                    err_type = type(e).__name__
+                    print(f"[DOCUMENT_QA_ERROR]")
+                    print(f"Module: retrieval_agent.py")
+                    print(f"Error: {err_type}")
+                    print(f"Details: {err_msg}")
+                    print(f"[ROUTER] Advanced retrieval failed, falling back to direct document load")
+                    
+                    # Last-resort fallback: bare file read + raw LLM call
+                    ans = "Document retrieval pipeline failed due to internal issue."
+                    try:
+                        import ollama
+                        fallback_content = ""
+                        ext = os.path.splitext(self._active_file_path)[1].lower()
+                        if ext == ".pdf":
+                            try:
+                                from langchain_community.document_loaders import PyPDFLoader
+                                docs = PyPDFLoader(self._active_file_path).load()
+                                fallback_content = "\n\n".join(d.page_content for d in docs)
+                            except Exception as pdf_e:
+                                fallback_content = f"Could not parse PDF in fallback mode: {pdf_e}"
+                        elif ext == ".docx":
+                            try:
+                                import docx as _docx_mod
+                                _doc_fb = _docx_mod.Document(self._active_file_path)
+                                fallback_content = "\n".join(p.text for p in _doc_fb.paragraphs).strip()
+                            except Exception as docx_e:
+                                fallback_content = f"Could not parse DOCX in fallback mode: {docx_e}"
+                        elif ext in (".txt", ".md", ".json", ".csv"):
+                            with open(self._active_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                                fallback_content = f.read()
+
+                        if fallback_content and not fallback_content.startswith("Could not"):
+                            print(f"[CHUNK_LOAD] Last-resort fallback: {len(fallback_content)} chars")
+                            prompt = f"Answer using only this text:\n\n{fallback_content[:6000]}\n\nQuestion: {text}"
+                            resp_ol = ollama.chat(model=MODEL, messages=[{'role': 'user', 'content': prompt}])
+                            ans = resp_ol.get('message', {}).get('content', ans)
+                        else:
+                            ans = (
+                                f"Could not read '{os.path.basename(self._active_file_path)}'. "
+                                "The file may be empty or unsupported."
+                            )
+                    except Exception as fallback_e:
+                        log.error(f"[FILE] Last-resort fallback also failed: {fallback_e}")
+                        ans = "Document retrieval pipeline failed. Please try again."
+                        
+                    resp = AgentResponse(answer=ans, intent="DOCUMENT_QA_FALLBACK")
                     resp.latency_ms = (time.perf_counter() - t0) * 1_000
                     return resp
 
@@ -869,6 +1085,7 @@ class Orchestrator:
                 _gk_resp = self._handle_general_ai_response(contextual_query)
                 _gk_resp.intent = "GENERAL"
                 _gk_resp.latency_ms = (time.perf_counter() - t0) * 1_000
+                print(f"[FINAL_ROUTE] GENERAL")
                 self._post_process(text, _gk_resp)
                 return _gk_resp
 
@@ -876,6 +1093,7 @@ class Orchestrator:
             _gk_resp = self._handle_general_ai_response(text, memory=_get_memory())
             _gk_resp.intent = "GENERAL"
             _gk_resp.latency_ms = (time.perf_counter() - t0) * 1_000
+            print(f"[FINAL_ROUTE] GENERAL")
             self._post_process(text, _gk_resp)
             return _gk_resp
 
@@ -933,9 +1151,9 @@ class Orchestrator:
                         "[ORCHESTRATOR] Anaphora resolved to %r", _sfm_remembered
                     )
                     _sfm_resp = self._handle_file_qa(_sfm_remembered, text)
-                    _sfm_resp.intent = "FILE_QA"
+                    _sfm_resp.intent = "DOCUMENT_QA"
                     _sfm_resp.latency_ms = (time.perf_counter() - t0) * 1_000
-                    self._post_process(text, _sfm_resp, tool_name="FILE_QA")
+                    self._post_process(text, _sfm_resp, tool_name="DOCUMENT_QA")
                     return _sfm_resp
 
             # ── A2) Selected-file follow-up shortcut ──────────────────────────
@@ -1045,14 +1263,14 @@ class Orchestrator:
                             _sfm_mem.set_selected_file("")
                         else:
                             log.info(
-                                "[ORCHESTRATOR] Selected-file follow-up → FILE_QA: "
+                                "[ORCHESTRATOR] Selected-file follow-up → DOCUMENT_QA: "
                                 "file=%r  query=%r",
                                 _sfm_sel, text[:60],
                             )
                             _sfm_resp = self._handle_file_qa(_sfm_sel, text)
-                            _sfm_resp.intent = "FILE_QA"
+                            _sfm_resp.intent = "DOCUMENT_QA"
                             _sfm_resp.latency_ms = (time.perf_counter() - t0) * 1_000
-                            self._post_process(text, _sfm_resp, tool_name="FILE_QA")
+                            self._post_process(text, _sfm_resp, tool_name="DOCUMENT_QA")
                             return _sfm_resp
                     elif _sfm_is_new_search or _sfm_other_files or _sfm_intent_override:
                         # Context switch: clear the stale selected file so the
@@ -1086,9 +1304,9 @@ class Orchestrator:
                         "[ORCHESTRATOR] Multi-file mode: %s", _sfm_multi_paths
                     )
                     _sfm_resp = self._handle_multi_file_qa(_sfm_multi_paths, text)
-                    _sfm_resp.intent = "FILE_QA"
+                    _sfm_resp.intent = "DOCUMENT_QA"
                     _sfm_resp.latency_ms = (time.perf_counter() - t0) * 1_000
-                    self._post_process(text, _sfm_resp, tool_name="FILE_QA")
+                    self._post_process(text, _sfm_resp, tool_name="DOCUMENT_QA")
                     return _sfm_resp
 
             elif len(_sfm_filenames) == 1:
@@ -2534,12 +2752,9 @@ class Orchestrator:
         4. Multiple + summarize/multi-file verb → auto-summarize all results.
         5. Multiple    → format numbered list; store pending selection in memory.
         """
-        # Clear stale file context so the new search runs globally
+        # We DO NOT clear pending selection here anymore to prevent 
+        # state loss if the search errors out or is a retry.
         _fs_ctx = _get_memory()
-        if _fs_ctx is not None:
-            _fs_ctx.set_selected_file("")
-            _fs_ctx.set_last_file("")
-            _fs_ctx.clear_pending_documents()
 
         try:
             from services.file_search_service import file_search_service
@@ -2601,10 +2816,24 @@ class Orchestrator:
         _MULTI_SUMMARIZE_RE = re.compile(
             r"\b(?:summarize|summarise|summarize\s+(?:all|them|each)|"
             r"give\s+(?:me\s+)?(?:a\s+)?summary|explain\s+(?:all|them)|"
+            r"analyze\s+(?:all|them)|"
             r"analyze|analyse|overview\s+of\s+(?:all|them)|"
             r"and\s+summarize|then\s+summarize)\b",
             re.IGNORECASE,
         )
+
+        if _fs_ctx is not None:
+            try:
+                # We found multiple results, safe to clear old state and set new state
+                _fs_ctx.set_selected_file("")
+                _fs_ctx.set_last_file("")
+                _fs_ctx.clear_pending_documents()
+                for r in results:
+                    _fs_ctx.add_pending_document(r["path"])
+            except Exception as e:
+                log.warning(f"[MEMORY_ERROR] Could not update pending documents: {e}")
+                print(f"[MEMORY_ERROR] Internal session state error occurred while preparing file selection.")
+                # We do not return here; we allow the search results to still be displayed.
         if _MULTI_SUMMARIZE_RE.search(text):
             # Auto-summarize the top results (cap at 4 text files)
             from agents.knowledge.retrieval_agent import (

@@ -566,9 +566,7 @@ def _load_all_files_from_folder(folder_path: str, query: str, model_name: str) -
         f"Files in {os.path.basename(folder_path)}:\n\n{preview}{truncation_msg}",
         folder_path,
     )
-
-
-
+def _get_authorized_docs_root() -> str:
     """Return the authorized document root path (lowercase, normalised)."""
     try:
         from configs.settings import settings
@@ -800,7 +798,8 @@ def _detect_content_type(context: str) -> str:
 
 
 def _ask_llm(model_name, context, query, source, *, is_summary: bool = False):
-    print("[DEBUG] LLM call count = 1")
+    print(f"[PROMPT_SIZE] {len(context)} chars")
+    print(f"[GENERATION] Starting grounded LLM generation")
     """Ask Ollama to answer using only the provided context. Returns answer string or None."""
     if not HAVE_OLLAMA:
         return None
@@ -947,6 +946,13 @@ def handle_retrieval(
             )
             target_file = None  # fall through to Rule 1b below
     if target_file:
+        fpath = os.path.join(DOCS_PATH, target_file)
+        from services.academic_pdf_parser import AcademicPDFParser, handle_structured_academic_qa
+        if AcademicPDFParser.is_academic_pdf(fpath):
+            log.info("[STRUCTURED_ACADEMIC] Routing to specialized Academic Parser")
+            ans = handle_structured_academic_qa(fpath, query)
+            return ans, target_file
+
         ext = os.path.splitext(target_file)[1].lower()
         content, source = _load_file_content(target_file)
 
@@ -1083,6 +1089,12 @@ def handle_retrieval(
             for _root in _search_roots:
                 _disk_path = _find_file_under_root(_root, filename_hint)
                 if _disk_path:
+                    from services.academic_pdf_parser import AcademicPDFParser, handle_structured_academic_qa
+                    if AcademicPDFParser.is_academic_pdf(_disk_path):
+                        log.info("[STRUCTURED_ACADEMIC] Routing direct disk file to specialized Academic Parser")
+                        ans = handle_structured_academic_qa(_disk_path, query)
+                        return ans, os.path.basename(_disk_path)
+
                     log.info(
                         "handle_retrieval: Rule-1b direct disk load for %r from %r",
                         filename_hint, _root,
@@ -1181,7 +1193,39 @@ def handle_retrieval(
 
     all_dbs = [db for db in [vector_db] + list(extra_dbs or []) if db is not None]
     if not all_dbs:
-        log.warning("handle_retrieval: no vector stores available")
+        log.warning("[VECTOR_STORE] handle_retrieval: no vector stores available")
+        # ── Fallback: load file directly from disk when last_file is known ──
+        # This prevents silent failure when the orchestrator has no Chroma DB
+        # but the active file path is resolvable on disk.
+        _fallback_path: Optional[str] = None
+        if last_file:
+            # Try DOCS_PATH first, then current working directory
+            _candidate = os.path.join(DOCS_PATH, last_file)
+            if os.path.isfile(_candidate):
+                _fallback_path = _candidate
+            else:
+                # last_file might be a full absolute path
+                if os.path.isfile(last_file):
+                    _fallback_path = last_file
+        if _fallback_path:
+            log.info(
+                "[CHUNK_LOAD] No vector store — loading %r directly from disk",
+                _fallback_path,
+            )
+            _fallback_content = _load_document_from_path(_fallback_path)
+            if _fallback_content and not _fallback_content.startswith("Error"):
+                _fname = os.path.basename(_fallback_path)
+                log.info(
+                    "[RETRIEVAL_READY] Direct fallback: %d chars from %r",
+                    len(_fallback_content), _fname,
+                )
+                _is_sum = _is_summary_intent(query)
+                _ans = _ask_llm(
+                    model_name, _fallback_content, query, _fname, is_summary=_is_sum
+                )
+                if _ans:
+                    return _ans, _fname
+                return _fallback_content[:3000], _fname
         return None, None
 
     log.info(
@@ -1193,6 +1237,7 @@ def handle_retrieval(
         log.debug("  store[%d]: %s", i, label)
 
     from engines.rag_engine import retrieve_top_k_multi
+    print(f"[RETRIEVAL] Querying vector store for '{query}'")
     results = retrieve_top_k_multi(query, all_dbs, k=10)
 
     if not results:
@@ -1254,8 +1299,17 @@ def handle_retrieval(
             )
         results = strict_results
 
-    # File filter — restrict to the active session document when in effect
     if _restrict_to_file:
+        fpath = os.path.join(DOCS_PATH, _restrict_to_file)
+        if not os.path.exists(fpath) and folder_path:
+            fpath = os.path.join(folder_path, _restrict_to_file)
+            
+        from services.academic_pdf_parser import AcademicPDFParser, handle_structured_academic_qa
+        if os.path.exists(fpath) and AcademicPDFParser.is_academic_pdf(fpath):
+            log.info("[STRUCTURED_ACADEMIC] Routing restricted file to specialized Academic Parser")
+            ans = handle_structured_academic_qa(fpath, query)
+            return ans, _restrict_to_file
+            
         fname_lower = _restrict_to_file.lower()
         results = [
             (doc, score) for doc, score in results
@@ -1271,6 +1325,7 @@ def handle_retrieval(
                 f"No relevant information about this was found in '{_restrict_to_file}'.",
                 _restrict_to_file,
             )
+        print(f"[RETRIEVAL] Found {len(results)} initial chunks from {fname_lower}")
 
     # Include the best-scoring chunk from EVERY source document so that
     # smaller files (e.g. a 2-row CSV) are not crowded out by a large PDF
@@ -1299,6 +1354,8 @@ def handle_retrieval(
         if doc.metadata.get("source", "") == best_source and id(doc) not in seen_ids
     ][:4]
     all_docs = ordered_docs + extras
+    print(f"[RERANK] Selected {len(all_docs)} top chunks")
+    print(f"[CHUNK_COUNT] {len(all_docs)} chunks used for context")
     source = ", ".join(src for src, _ in relevant_sources)
 
     # Strict keyword relevance check — skip for summary/explain requests since

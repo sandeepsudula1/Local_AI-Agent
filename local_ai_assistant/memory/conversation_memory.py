@@ -472,6 +472,26 @@ class ConversationMemory:
         with self._lock:
             self._pending_documents = []
 
+    def add_pending_document(self, path: str) -> None:
+        """Add a single pending document to the list safely, avoiding duplicates."""
+        with self._lock:
+            if not hasattr(self, "_pending_documents"):
+                self._pending_documents = []
+            
+            normalized = str(path).strip()
+            # Check if it already exists to prevent duplicates
+            for doc in self._pending_documents:
+                if doc.get("path") == normalized:
+                    return
+            
+            self._pending_documents.append({"path": normalized})
+            log.debug("Memory: pending document added: %s", normalized)
+
+    def has_pending_documents(self) -> bool:
+        """Return True if there are pending documents waiting."""
+        with self._lock:
+            return bool(getattr(self, "_pending_documents", []))
+
     # ── Last response context (session-only) ──────────────────────────────
 
     def set_last_response(self, response: str) -> None:

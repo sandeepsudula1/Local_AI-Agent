@@ -34,11 +34,7 @@ def _default_watch_paths() -> list[Path]:
     home = Path.home()
 
     user_paths = [
-        home / "Downloads",
-        home / "Desktop",
         home / "Documents",
-        home / "OneDrive" / "Documents",
-        home / "OneDrive" / "Desktop",
     ]
 
     # ✅ NEW: project-controlled folder (important for portability)
@@ -53,6 +49,10 @@ def _default_watch_paths() -> list[Path]:
 # ------------------ REMAINING CODE (UNCHANGED) ------------------
 
 class _IndexEventHandler:
+    def __init__(self):
+        self._last_event = {}
+        self._lock = threading.Lock()
+
     def dispatch(self, event) -> None:
         try:
             src = getattr(event, "src_path", None)
@@ -63,9 +63,20 @@ class _IndexEventHandler:
             if is_dir or not src:
                 return
 
-            ext = Path(src).suffix.lower()
+            path_obj = Path(src)
+            ext = path_obj.suffix.lower()
             if ext not in _WATCHED_EXTENSIONS:
                 return
+                
+            name = path_obj.name
+            if name.startswith("~") or name.startswith(".") or name.endswith(".tmp") or name.endswith(".part") or name.endswith(".temp"):
+                return
+                
+            with self._lock:
+                now = time.time()
+                if now - self._last_event.get(src, 0) < 3.0:
+                    return
+                self._last_event[src] = now
 
             from services.file_indexer_service import file_indexer
             from memory.conversation_memory import conversation_memory
@@ -194,6 +205,10 @@ class FileWatcherService:
                     continue
 
                 if entry.suffix.lower() not in _WATCHED_EXTENSIONS:
+                    continue
+                    
+                name = entry.name
+                if name.startswith("~") or name.startswith(".") or name.endswith(".tmp") or name.endswith(".part") or name.endswith(".temp"):
                     continue
 
                 path_str = str(entry)

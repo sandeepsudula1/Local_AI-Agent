@@ -147,6 +147,7 @@ def main():
         # This keeps startup instant (< 3 seconds).
         log.info("Core services started (vector store deferred to on-demand).")
 
+
         # Background Email Poller
         def _email_poll_loop():
             from agents.knowledge.email_query_agent import invalidate_email_cache
